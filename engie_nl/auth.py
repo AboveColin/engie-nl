@@ -5,18 +5,31 @@ access token straight to the gateway as ``Authorization: Bearer``. Nothing is
 exchanged. So this module has one job: obtain and refresh an Okta token pair
 for the app's public client.
 
-Three ways in, in the order to try them:
+ENGIE runs Okta **Identity Engine** (`/.well-known/okta-organization` answers
+``"pipeline":"idx"``). That rules out the classic trick of passing a
+``sessionToken`` to ``/authorize``: Identity Engine ignores the parameter and
+serves its sign-in page instead. The supported headless path is the interaction
+code flow, and :meth:`OktaAuth.login` walks it:
 
-1. :meth:`OktaAuth.login`: username and password through Okta's classic Authn
-   API, then ``/authorize`` with the returned ``sessionToken`` and PKCE. Works
-   for any public client; fails with :class:`EngieMfaRequiredError` when the
-   account has a second factor.
-2. :meth:`OktaAuth.password_grant`: the resource owner password grant. The
-   Okta org lists it; whether this client has it enabled is unknown until
-   tried. One request answers.
-3. :meth:`OktaAuth.begin_browser_login` and :meth:`OktaAuth.finish_browser_login`:
-   the user opens the URL, logs in (MFA included), and pastes back the
-   ``engie://login/okta/callback?code=...`` URL the browser could not open.
+1. ``POST /oauth2/default/v1/interact`` returns an interaction handle.
+2. ``POST /idp/idx/introspect`` turns that into a state handle and the first
+   remediation, which for this org is ``identify`` and asks only for the email.
+3. ``POST /idp/idx/identify`` with the email offers ``challenge-authenticator``.
+4. ``POST /idp/idx/challenge/answer`` with the password returns an interaction
+   code, which ``/v1/token`` exchanges for the token pair.
+
+Each step is driven by the ``href`` the previous response advertises, so an
+extra step ENGIE adds later shows up as a named remediation rather than a
+silent failure. An account that needs another authenticator stops with
+:class:`EngieMfaRequiredError` naming what Okta offered.
+
+Two other ways in remain:
+
+- :meth:`OktaAuth.password_grant`: the resource owner grant. The org lists it;
+  whether this client has it enabled is unverified. One request answers.
+- :meth:`OktaAuth.begin_browser_login` and :meth:`OktaAuth.finish_browser_login`:
+  the user opens the URL, logs in with any factor, and pastes back the
+  ``engie://login/okta/callback?code=...`` URL the browser could not open.
 
 Refresh always goes through :meth:`OktaAuth.refresh` with the refresh token
 (``offline_access`` is in the app's scope).
@@ -27,6 +40,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import json
 import secrets
 import time
 from dataclasses import dataclass
@@ -37,14 +51,12 @@ import aiohttp
 
 from .constants import (
     DEFAULT_TIMEOUT,
-    OKTA_AUTHN_URL,
-    OKTA_AUTHORIZE_URL,
+    IDX_HEADERS,
     OKTA_CLIENT_ID,
     OKTA_ISSUER,
     OKTA_ORG_URL,
     OKTA_REDIRECT_URI,
     OKTA_SCOPE,
-    OKTA_TOKEN_URL,
     TOKEN_REFRESH_MARGIN,
 )
 from ._http import SessionOwner, json_or_text
@@ -164,18 +176,23 @@ class OktaAuth(SessionOwner):
     # loopback server; the URLs derive from issuer/org_url at call time.
     @property
     def authorize_url(self) -> str:
-        """Okta's ``/v1/authorize`` for this issuer."""
-        return OKTA_AUTHORIZE_URL if self.issuer == OKTA_ISSUER else f"{self.issuer}/v1/authorize"
+        """Okta's ``/v1/authorize``, used only by the browser flow."""
+        return f"{self.issuer}/v1/authorize"
 
     @property
     def token_url(self) -> str:
-        """Okta's ``/v1/token`` for this issuer."""
-        return OKTA_TOKEN_URL if self.issuer == OKTA_ISSUER else f"{self.issuer}/v1/token"
+        """Okta's ``/v1/token``."""
+        return f"{self.issuer}/v1/token"
 
     @property
-    def authn_url(self) -> str:
-        """The org-level classic Authn API, ``/api/v1/authn``."""
-        return OKTA_AUTHN_URL if self.org_url == OKTA_ORG_URL else f"{self.org_url}/api/v1/authn"
+    def interact_url(self) -> str:
+        """Identity Engine's ``/v1/interact``, which starts a login transaction."""
+        return f"{self.issuer}/v1/interact"
+
+    @property
+    def idx_introspect_url(self) -> str:
+        """Identity Engine's ``/idp/idx/introspect``, which returns the first remediation."""
+        return f"{self.org_url}/idp/idx/introspect"
 
     async def __aenter__(self) -> OktaAuth:
         return self
@@ -183,74 +200,103 @@ class OktaAuth(SessionOwner):
     # --- flows -------------------------------------------------------------
 
     async def login(self, username: str, password: str) -> TokenSet:
-        """Username and password through the Authn API, then PKCE with the session token."""
-        session_token = await self.authn(username, password)
+        """Log in with an email and password through the Identity Engine."""
         verifier, challenge = make_pkce_pair()
-        state = _b64url(secrets.token_bytes(16))
-        code = await self._authorize_with_session_token(session_token, challenge, state)
-        return await self.exchange_code(code, verifier)
+        handle = await self._interact(challenge)
+        idx = await self._idx_post(self.idx_introspect_url, {"interactionHandle": handle})
+        idx = await self._remediate(idx, "identify", {"identifier": username})
+        if _remediation(idx, "challenge-authenticator") is None:
+            idx = await self._select_password(idx)
+        idx = await self._remediate(idx, "challenge-authenticator", {"credentials": {"passcode": password}})
+        return await self._token_request(
+            {
+                "grant_type": "interaction_code",
+                "client_id": self.client_id,
+                "interaction_code": _interaction_code(idx),
+                "code_verifier": verifier,
+            }
+        )
 
-    async def authn(self, username: str, password: str) -> str:
-        """``POST /api/v1/authn``; returns Okta's one-time ``sessionToken``."""
-        payload = {
-            "username": username,
-            "password": password,
-            "options": {"multiOptionalFactorEnroll": False, "warnBeforePasswordExpired": False},
-        }
-        status, data = await self._post_json(self.authn_url, payload)
-        code = _okta_error_code(data)
-        detail = _okta_error_summary(data) or "no detail"
-        # Okta answers E0000004 for a wrong password and for a locked or
-        # deactivated account alike, on purpose, so that an attacker cannot
-        # enumerate accounts. Naming the code is the only thing that lets the
-        # reader tell a typo from a state a retry will never fix.
-        if status == 401 or (status >= 400 and code == "E0000004"):
-            raise EngieAuthError(f"Okta rejected the login (HTTP {status}, {code or 'no code'}): {detail}")
-        if status >= 400:
-            raise EngieAuthError(f"Okta authn failed (HTTP {status}, {code or 'no code'}): {detail}")
-        tx_status = str(data.get("status") or "")
-        if tx_status == "SUCCESS":
-            token = data.get("sessionToken")
-            if isinstance(token, str) and token:
-                return token
-            raise EngieAuthError("Okta authn succeeded without a sessionToken")
-        if tx_status.startswith("MFA") or tx_status in ("PASSWORD_EXPIRED", "PASSWORD_WARN", "LOCKED_OUT"):
-            factors = data.get("_embedded", {}).get("factors") if isinstance(data.get("_embedded"), dict) else None
-            raise EngieMfaRequiredError(
-                f"Okta needs more than a password for this account ({tx_status})",
-                status=tx_status,
-                factors=factors if isinstance(factors, list) else None,
-            )
-        raise EngieAuthError(f"Okta authn ended in unexpected status {tx_status!r}")
-
-    async def _authorize_with_session_token(self, session_token: str, challenge: str, state: str) -> str:
-        # Send no `prompt` parameter. With `prompt=none` Okta looks for an
-        # existing browser SSO cookie and refuses with `login_required` before
-        # it ever reads the sessionToken, which is the only session a scripted
-        # client has. Measured against login.engie.nl on 2026-09-07.
-        params = {
+    async def _interact(self, challenge: str) -> str:
+        """Start an Identity Engine transaction and return its interaction handle."""
+        form = {
             "client_id": self.client_id,
-            "redirect_uri": self.redirect_uri,
-            "response_type": "code",
             "scope": self.scope,
-            "state": state,
+            "redirect_uri": self.redirect_uri,
             "code_challenge": challenge,
             "code_challenge_method": "S256",
-            "sessionToken": session_token,
+            "state": _b64url(secrets.token_bytes(16)),
         }
         session = await self._get_session()
         try:
-            async with session.get(
-                self.authorize_url, params=params, allow_redirects=False, timeout=self._timeout
+            async with session.post(
+                self.interact_url, data=form, headers={"Accept": "application/json"}, timeout=self._timeout
             ) as resp:
-                location = resp.headers.get("Location")
+                data = await json_or_text(resp)
                 status = resp.status
-                body = await resp.text()
         except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-            raise EngieNetworkError(f"Okta authorize request failed: {err}") from err
-        if not location:
-            raise EngieAuthError(f"Okta authorize did not redirect (HTTP {status}): {body[:200]}")
-        return self._code_from_callback(location, expected_state=state)
+            raise EngieNetworkError(f"Okta interact request failed: {err}") from err
+        if status >= 400 or not isinstance(data, dict) or not data.get("interaction_handle"):
+            raise EngieAuthError(f"Okta refused to start a login (HTTP {status}): {str(data)[:200]}")
+        return str(data["interaction_handle"])
+
+    async def _idx_post(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """POST one IDX step.
+
+        A 4xx still carries the remediation body (a wrong password comes back as
+        401 with the reason in ``messages``), so the status is not an error here.
+        """
+        session = await self._get_session()
+        try:
+            async with session.post(
+                url, data=json.dumps(payload), headers=IDX_HEADERS, timeout=self._timeout
+            ) as resp:
+                data = await json_or_text(resp)
+                status = resp.status
+        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+            raise EngieNetworkError(f"Okta IDX request failed: {err}") from err
+        if not isinstance(data, dict):
+            raise EngieAuthError(f"Okta IDX returned a non-JSON body (HTTP {status}): {str(data)[:200]}")
+        return data
+
+    async def _remediate(self, idx: dict[str, Any], name: str, values: dict[str, Any]) -> dict[str, Any]:
+        """Answer one named remediation, following the href that IDX advertised for it."""
+        step = _remediation(idx, name)
+        if step is None:
+            raise self._cannot_continue(idx, name)
+        href = step.get("href")
+        if not isinstance(href, str) or not href:
+            raise EngieAuthError(f"Okta remediation {name} carries no href")
+        result = await self._idx_post(href, {**values, "stateHandle": _state_handle(idx)})
+        errors = _idx_messages(result)
+        if errors:
+            raise EngieAuthError(f"Okta refused the {name} step: {errors}")
+        return result
+
+    async def _select_password(self, idx: dict[str, Any]) -> dict[str, Any]:
+        """Pick the password authenticator when Okta asks which one to use."""
+        authenticator_id = _password_authenticator_id(idx)
+        if authenticator_id is None:
+            raise self._cannot_continue(idx, "challenge-authenticator")
+        return await self._remediate(
+            idx, "select-authenticator-authenticate", {"authenticator": {"id": authenticator_id}}
+        )
+
+    def _cannot_continue(self, idx: dict[str, Any], wanted: str) -> EngieAuthError:
+        """Turn a missing remediation into the most specific error the response supports."""
+        offered = [
+            str(step.get("name"))
+            for step in (idx.get("remediation", {}) or {}).get("value", [])
+            if isinstance(step, dict)
+        ]
+        options = _authenticator_options(idx)
+        if options:
+            return EngieMfaRequiredError(
+                f"Okta wants an authenticator this client cannot answer; it offered: {', '.join(options)}",
+                status=",".join(offered) or "unknown",
+                factors=[{"factorType": option} for option in options],
+            )
+        return EngieAuthError(f"Okta did not offer the {wanted} step; it offered {offered or 'nothing'}")
 
     def begin_browser_login(self) -> BrowserLogin:
         """Build the authorize URL for a human to open; finish with :meth:`finish_browser_login`."""
@@ -349,31 +395,81 @@ class OktaAuth(SessionOwner):
             raise EngieAuthError("Okta token endpoint returned a non-JSON body")
         return TokenSet.from_token_response(data)
 
-    async def _post_json(self, url: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-        session = await self._get_session()
-        try:
-            async with session.post(
-                url,
-                json=payload,
-                headers={"Accept": "application/json", "Content-Type": "application/json"},
-                timeout=self._timeout,
-            ) as resp:
-                data = await json_or_text(resp)
-                return resp.status, data if isinstance(data, dict) else {"_text": data}
-        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-            raise EngieNetworkError(f"Okta request failed: {err}") from err
+
+def _state_handle(idx: dict[str, Any]) -> str:
+    """The token that ties one IDX step to the next."""
+    handle = idx.get("stateHandle")
+    if not isinstance(handle, str) or not handle:
+        raise EngieAuthError("Okta IDX response carries no stateHandle")
+    return handle
 
 
-def _okta_error_code(data: dict[str, Any]) -> str | None:
-    code = data.get("errorCode")
-    return str(code) if code else None
+def _remediation(idx: dict[str, Any], name: str) -> dict[str, Any] | None:
+    """The named remediation from an IDX response, or ``None`` when it is not offered."""
+    block = idx.get("remediation")
+    steps = block.get("value", []) if isinstance(block, dict) else []
+    for step in steps:
+        if isinstance(step, dict) and step.get("name") == name:
+            return step
+    return None
 
 
-def _okta_error_summary(data: dict[str, Any]) -> str | None:
-    summary = data.get("errorSummary")
-    causes = data.get("errorCauses")
-    if isinstance(causes, list) and causes and isinstance(causes[0], dict):
-        cause = causes[0].get("errorSummary")
-        if cause:
-            return f"{summary}: {cause}" if summary else str(cause)
-    return str(summary) if summary else None
+def _idx_messages(idx: dict[str, Any]) -> str:
+    """Okta's own error text for a step, already localised (Dutch on this org)."""
+    block = idx.get("messages")
+    values = block.get("value", []) if isinstance(block, dict) else []
+    texts = [
+        str(message.get("message"))
+        for message in values
+        if isinstance(message, dict) and message.get("message") and message.get("class", "ERROR") == "ERROR"
+    ]
+    return "; ".join(texts)
+
+
+def _authenticator_field(idx: dict[str, Any]) -> dict[str, Any] | None:
+    step = _remediation(idx, "select-authenticator-authenticate")
+    if step is None:
+        return None
+    for field in step.get("value", []):
+        if isinstance(field, dict) and field.get("name") == "authenticator":
+            return field
+    return None
+
+
+def _authenticator_options(idx: dict[str, Any]) -> list[str]:
+    """Labels of the authenticators Okta offered, for example ``["Email", "Password"]``."""
+    field = _authenticator_field(idx)
+    if field is None:
+        return []
+    return [str(option.get("label")) for option in field.get("options", []) if isinstance(option, dict)]
+
+
+def _password_authenticator_id(idx: dict[str, Any]) -> str | None:
+    """The id of the password authenticator among the offered options."""
+    field = _authenticator_field(idx)
+    if field is None:
+        return None
+    for option in field.get("options", []):
+        if not isinstance(option, dict):
+            continue
+        form = (option.get("value") or {}).get("form") or {}
+        entries = {
+            entry.get("name"): entry.get("value") for entry in form.get("value", []) if isinstance(entry, dict)
+        }
+        if entries.get("methodType") == "password" or str(option.get("label", "")).lower() == "password":
+            identifier = entries.get("id")
+            if isinstance(identifier, str):
+                return identifier
+    return None
+
+
+def _interaction_code(idx: dict[str, Any]) -> str:
+    """The one-time code a finished IDX transaction hands to ``/v1/token``."""
+    success = idx.get("successWithInteractionCode")
+    fields = success.get("value", []) if isinstance(success, dict) else []
+    for field in fields:
+        if isinstance(field, dict) and field.get("name") == "interaction_code":
+            code = field.get("value")
+            if isinstance(code, str) and code:
+                return code
+    raise EngieAuthError("Okta finished the login without an interaction code")

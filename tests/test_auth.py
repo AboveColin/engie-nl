@@ -1,22 +1,46 @@
-"""The Okta flows against a loopback Okta."""
+"""The Okta flows against a loopback Identity Engine."""
 
 from __future__ import annotations
 
-import hashlib
 import base64
+import hashlib
 import time
 
 import pytest
-from aiohttp import web
 
 from engie_nl import EngieAuthError, EngieMfaRequiredError, OktaAuth, TokenSet, make_pkce_pair
-from tests.conftest import ACCESS, CODE, PASSWORD, REDIRECT, REFRESH, SESSION_TOKEN, USERNAME, FakeServer
+from tests.conftest import (
+    ACCESS,
+    CODE,
+    INTERACTION_CODE,
+    PASSWORD,
+    PASSWORD_AUTHENTICATOR_ID,
+    REDIRECT,
+    REFRESH,
+    STATE_HANDLE,
+    USERNAME,
+    FakeServer,
+    idx_body,
+    remediation,
+    select_authenticator,
+)
+
+IDX_STEPS = [
+    "/oauth2/default/v1/interact",
+    "/idp/idx/introspect",
+    "/idp/idx/identify",
+    "/idp/idx/challenge/answer",
+    "/oauth2/default/v1/token",
+]
+
+
+def _challenge_of(verifier: str) -> str:
+    return base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
 
 
 def test_pkce_pair_is_s256() -> None:
     verifier, challenge = make_pkce_pair()
-    digest = hashlib.sha256(verifier.encode()).digest()
-    assert challenge == base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+    assert challenge == _challenge_of(verifier)
     assert 43 <= len(verifier) <= 128
 
 
@@ -34,71 +58,81 @@ def test_tokenset_requires_access_token() -> None:
         TokenSet.from_token_response({"expires_in": 10})
 
 
-async def test_login_authn_then_pkce(okta_ok: FakeServer, auth: OktaAuth) -> None:
+async def test_login_walks_the_idx_flow(okta_ok: FakeServer, auth: OktaAuth) -> None:
     ts = await auth.login(USERNAME, PASSWORD)
     assert ts.access_token == ACCESS
     assert ts.refresh_token == REFRESH
     assert ts.expires_at > time.time()
-    paths = [r.path for r in okta_ok.requests]
-    assert paths == ["/api/v1/authn", "/oauth2/default/v1/authorize", "/oauth2/default/v1/token"]
-    authorize = okta_ok.requests[1].query
-    assert authorize["redirect_uri"] == REDIRECT
-    assert "offline_access" in authorize["scope"]
+    assert okta_ok.paths == IDX_STEPS
+
+    interact = okta_ok.forms[0]
+    assert interact["code_challenge_method"] == "S256"
+    assert interact["redirect_uri"] == REDIRECT
+    assert "offline_access" in interact["scope"]
+
+    introspect, identify, answer = okta_ok.jsons
+    assert introspect == {"interactionHandle": "ih-1"}
+    assert identify == {"identifier": USERNAME, "stateHandle": STATE_HANDLE}
+    assert answer == {"credentials": {"passcode": PASSWORD}, "stateHandle": STATE_HANDLE}
+
     exchange = okta_ok.forms[-1]
-    assert exchange["grant_type"] == "authorization_code"
-    assert exchange["code"] == CODE
-    # The verifier sent must hash to the challenge that was sent.
-    digest = hashlib.sha256(exchange["code_verifier"].encode()).digest()
-    assert authorize["code_challenge"] == base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+    assert exchange["grant_type"] == "interaction_code"
+    assert exchange["interaction_code"] == INTERACTION_CODE
+    # The verifier sent to /token must match the challenge sent to /interact.
+    assert _challenge_of(exchange["code_verifier"]) == interact["code_challenge"]
 
 
-async def test_authorize_sends_no_prompt_parameter(okta_ok: FakeServer, auth: OktaAuth) -> None:
-    """`prompt=none` made the real Okta answer login_required for every scripted login."""
+async def test_login_never_touches_authorize(okta_ok: FakeServer, auth: OktaAuth) -> None:
+    """Identity Engine serves HTML at /authorize, so the password flow must not go there."""
     await auth.login(USERNAME, PASSWORD)
-    query = okta_ok.requests[1].query
-    assert "prompt" not in query
-    assert query["sessionToken"] == SESSION_TOKEN
+    assert "/oauth2/default/v1/authorize" not in okta_ok.paths
 
 
-async def test_authn_error_names_the_okta_code(server: FakeServer, auth: OktaAuth) -> None:
-    """A refusal must carry Okta's errorCode, or a typo looks like a lockout."""
-    server.json(
-        "/api/v1/authn",
-        {"errorCode": "E0000119", "errorSummary": "Account locked"},
-        status=403,
-        method="POST",
-    )
-    with pytest.raises(EngieAuthError, match="E0000119"):
-        await auth.login(USERNAME, PASSWORD)
-
-
-async def test_login_wrong_password(okta_ok: FakeServer, auth: OktaAuth) -> None:
-    with pytest.raises(EngieAuthError):
+async def test_login_wrong_password_reports_oktas_own_words(okta_ok: FakeServer, auth: OktaAuth) -> None:
+    with pytest.raises(EngieAuthError, match="Authenticatie mislukt"):
         await auth.login(USERNAME, "fout")
-    assert [r.path for r in okta_ok.requests] == ["/api/v1/authn"]
+    assert okta_ok.paths == IDX_STEPS[:4]
 
 
-async def test_login_mfa_required(server: FakeServer, auth: OktaAuth) -> None:
-    server.json(
-        "/api/v1/authn",
-        {"status": "MFA_REQUIRED", "_embedded": {"factors": [{"factorType": "sms"}]}},
+async def test_login_selects_the_password_authenticator_when_asked(
+    okta_ok: FakeServer, auth: OktaAuth
+) -> None:
+    """Some accounts get the picker instead of the password challenge; pick Password."""
+    base = okta_ok.url
+    okta_ok.json("/idp/idx/identify", idx_body(base, select_authenticator(base, "Email", "Password")), method="POST")
+    okta_ok.json(
+        "/idp/idx/challenge",
+        idx_body(base, remediation("challenge-authenticator", base, "/idp/idx/challenge/answer",
+                                   [{"name": "credentials", "type": "object"}])),
         method="POST",
     )
+    ts = await auth.login(USERNAME, PASSWORD)
+    assert ts.access_token == ACCESS
+    assert "/idp/idx/challenge" in okta_ok.paths
+    select = okta_ok.jsons[2]
+    assert select == {"authenticator": {"id": PASSWORD_AUTHENTICATOR_ID}, "stateHandle": STATE_HANDLE}
+
+
+async def test_login_without_a_password_option_raises_mfa(okta_ok: FakeServer, auth: OktaAuth) -> None:
+    base = okta_ok.url
+    okta_ok.json("/idp/idx/identify", idx_body(base, select_authenticator(base, "Email")), method="POST")
     with pytest.raises(EngieMfaRequiredError) as err:
         await auth.login(USERNAME, PASSWORD)
-    assert err.value.status == "MFA_REQUIRED"
-    assert err.value.factors == [{"factorType": "sms"}]
+    assert err.value.factors == [{"factorType": "Email"}]
+    assert "Email" in str(err.value)
 
 
-async def test_authorize_error_in_location(okta_ok: FakeServer, auth: OktaAuth) -> None:
-    okta_ok.json("/api/v1/authn", {"status": "SUCCESS", "sessionToken": "other"}, method="POST")
-    with pytest.raises(EngieAuthError, match="login_required"):
+async def test_login_with_no_usable_remediation_says_what_was_offered(
+    okta_ok: FakeServer, auth: OktaAuth
+) -> None:
+    okta_ok.json("/idp/idx/identify", idx_body(okta_ok.url), method="POST")
+    with pytest.raises(EngieAuthError, match="did not offer"):
         await auth.login(USERNAME, PASSWORD)
 
 
-async def test_authorize_without_redirect(okta_ok: FakeServer, auth: OktaAuth) -> None:
-    okta_ok.handle("GET", "/oauth2/default/v1/authorize", lambda _r: web.Response(text="<html>login</html>"))
-    with pytest.raises(EngieAuthError, match="did not redirect"):
+async def test_interact_refusal_is_an_auth_error(okta_ok: FakeServer, auth: OktaAuth) -> None:
+    okta_ok.json("/oauth2/default/v1/interact", {"error": "invalid_client"}, status=400, method="POST")
+    with pytest.raises(EngieAuthError, match="refused to start a login"):
         await auth.login(USERNAME, PASSWORD)
 
 
@@ -106,8 +140,7 @@ async def test_browser_login_roundtrip(okta_ok: FakeServer, auth: OktaAuth) -> N
     started = auth.begin_browser_login()
     assert started.url.startswith(f"{auth.issuer}/v1/authorize?")
     assert f"state={started.state}" in started.url
-    callback = f"{REDIRECT}?code={CODE}&state={started.state}"
-    ts = await auth.finish_browser_login(callback, started)
+    ts = await auth.finish_browser_login(f"{REDIRECT}?code={CODE}&state={started.state}", started)
     assert ts.access_token == ACCESS
 
 
@@ -115,6 +148,13 @@ async def test_browser_login_rejects_foreign_state(okta_ok: FakeServer, auth: Ok
     started = auth.begin_browser_login()
     with pytest.raises(EngieAuthError, match="state"):
         await auth.finish_browser_login(f"{REDIRECT}?code={CODE}&state=nope", started)
+
+
+async def test_browser_login_surfaces_an_error_callback(okta_ok: FakeServer, auth: OktaAuth) -> None:
+    started = auth.begin_browser_login()
+    callback = f"{REDIRECT}?error=access_denied&error_description=nope&state={started.state}"
+    with pytest.raises(EngieAuthError, match="access_denied"):
+        await auth.finish_browser_login(callback, started)
 
 
 async def test_refresh_keeps_old_refresh_token_when_not_rotated(okta_ok: FakeServer, auth: OktaAuth) -> None:

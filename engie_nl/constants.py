@@ -56,7 +56,17 @@ OKTA_ORG_URL = "https://login.engie.nl"
 OKTA_ISSUER = f"{OKTA_ORG_URL}/oauth2/default"
 OKTA_AUTHORIZE_URL = f"{OKTA_ISSUER}/v1/authorize"
 OKTA_TOKEN_URL = f"{OKTA_ISSUER}/v1/token"
-OKTA_AUTHN_URL = f"{OKTA_ORG_URL}/api/v1/authn"
+
+# The org runs Okta Identity Engine: https://login.engie.nl/.well-known/okta-organization
+# answers "pipeline":"idx" (measured 2026-09-07). That is why the headless login uses
+# the interaction code flow below and not the classic sessionToken one; see the API map.
+OKTA_INTERACT_URL = f"{OKTA_ISSUER}/v1/interact"
+OKTA_IDX_INTROSPECT_URL = f"{OKTA_ORG_URL}/idp/idx/introspect"
+
+IDX_HEADERS = {
+    "Content-Type": "application/ion+json; okta-version=1.0.0",
+    "Accept": "application/ion+json; okta-version=1.0.0",
+}
 
 # The app's public OIDC client. A public client has no secret; PKCE protects
 # the code exchange. Recovered from nl.engie.BuildConfig.

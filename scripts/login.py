@@ -60,19 +60,19 @@ async def main() -> int:
         password = getpass.getpass("password: ")
 
         if args.check:
-            # Stops after the password step, so a refusal names Okta's own code
-            # instead of being blamed on the authorize or exchange that follows.
+            # Runs the real login and throws the tokens away, so a refusal is
+            # Okta's own words about this account rather than a guess.
             try:
-                token = await auth.authn(username, password)
+                tokens = await auth.login(username, password)
             except EngieMfaRequiredError as err:
-                print(f"password: accepted, but Okta wants a second factor ({err.status})")
-                print(f"  factors: {[f.get('factorType') for f in err.factors]}")
+                print(f"login: Okta wants another authenticator ({err.status})")
+                print(f"  offered: {[f.get('factorType') for f in err.factors]}")
                 print("  use: python scripts/login.py --browser")
                 return 2
             except EngieAuthError as err:
-                print(f"password: REFUSED. {err}")
+                print(f"login: REFUSED. {err}")
                 return 1
-            print(f"password: accepted, sessionToken is {len(token)} chars")
+            print(f"login: accepted, access token is {len(tokens.access_token)} chars, not saved")
             return 0
 
         if args.try_password_grant:
