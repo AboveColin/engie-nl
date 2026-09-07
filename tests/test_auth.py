@@ -10,7 +10,7 @@ import pytest
 from aiohttp import web
 
 from engie_nl import EngieAuthError, EngieMfaRequiredError, OktaAuth, TokenSet, make_pkce_pair
-from tests.conftest import ACCESS, CODE, PASSWORD, REDIRECT, REFRESH, USERNAME, FakeServer
+from tests.conftest import ACCESS, CODE, PASSWORD, REDIRECT, REFRESH, SESSION_TOKEN, USERNAME, FakeServer
 
 
 def test_pkce_pair_is_s256() -> None:
@@ -50,6 +50,26 @@ async def test_login_authn_then_pkce(okta_ok: FakeServer, auth: OktaAuth) -> Non
     # The verifier sent must hash to the challenge that was sent.
     digest = hashlib.sha256(exchange["code_verifier"].encode()).digest()
     assert authorize["code_challenge"] == base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+
+async def test_authorize_sends_no_prompt_parameter(okta_ok: FakeServer, auth: OktaAuth) -> None:
+    """`prompt=none` made the real Okta answer login_required for every scripted login."""
+    await auth.login(USERNAME, PASSWORD)
+    query = okta_ok.requests[1].query
+    assert "prompt" not in query
+    assert query["sessionToken"] == SESSION_TOKEN
+
+
+async def test_authn_error_names_the_okta_code(server: FakeServer, auth: OktaAuth) -> None:
+    """A refusal must carry Okta's errorCode, or a typo looks like a lockout."""
+    server.json(
+        "/api/v1/authn",
+        {"errorCode": "E0000119", "errorSummary": "Account locked"},
+        status=403,
+        method="POST",
+    )
+    with pytest.raises(EngieAuthError, match="E0000119"):
+        await auth.login(USERNAME, PASSWORD)
 
 
 async def test_login_wrong_password(okta_ok: FakeServer, auth: OktaAuth) -> None:

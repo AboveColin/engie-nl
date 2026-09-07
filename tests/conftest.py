@@ -105,6 +105,9 @@ def okta_ok(server: FakeServer) -> FakeServer:
         assert q["client_id"] == CLIENT_ID
         assert q["code_challenge_method"] == "S256"
         assert q["response_type"] == "code"
+        # A scripted client has no browser SSO cookie, so `prompt=none` makes
+        # the real Okta answer login_required and ignore the sessionToken.
+        assert "prompt" not in q
         if q.get("sessionToken") != SESSION_TOKEN:
             loc = f"{REDIRECT}?{urlencode({'error': 'login_required', 'state': q['state']})}"
         else:

@@ -198,10 +198,16 @@ class OktaAuth(SessionOwner):
             "options": {"multiOptionalFactorEnroll": False, "warnBeforePasswordExpired": False},
         }
         status, data = await self._post_json(self.authn_url, payload)
-        if status == 401 or (status >= 400 and _okta_error_code(data) == "E0000004"):
-            raise EngieAuthError("Okta rejected the username or password")
+        code = _okta_error_code(data)
+        detail = _okta_error_summary(data) or "no detail"
+        # Okta answers E0000004 for a wrong password and for a locked or
+        # deactivated account alike, on purpose, so that an attacker cannot
+        # enumerate accounts. Naming the code is the only thing that lets the
+        # reader tell a typo from a state a retry will never fix.
+        if status == 401 or (status >= 400 and code == "E0000004"):
+            raise EngieAuthError(f"Okta rejected the login (HTTP {status}, {code or 'no code'}): {detail}")
         if status >= 400:
-            raise EngieAuthError(f"Okta authn failed: {_okta_error_summary(data) or status}")
+            raise EngieAuthError(f"Okta authn failed (HTTP {status}, {code or 'no code'}): {detail}")
         tx_status = str(data.get("status") or "")
         if tx_status == "SUCCESS":
             token = data.get("sessionToken")
@@ -218,6 +224,10 @@ class OktaAuth(SessionOwner):
         raise EngieAuthError(f"Okta authn ended in unexpected status {tx_status!r}")
 
     async def _authorize_with_session_token(self, session_token: str, challenge: str, state: str) -> str:
+        # Send no `prompt` parameter. With `prompt=none` Okta looks for an
+        # existing browser SSO cookie and refuses with `login_required` before
+        # it ever reads the sessionToken, which is the only session a scripted
+        # client has. Measured against login.engie.nl on 2026-09-07.
         params = {
             "client_id": self.client_id,
             "redirect_uri": self.redirect_uri,
@@ -227,7 +237,6 @@ class OktaAuth(SessionOwner):
             "code_challenge": challenge,
             "code_challenge_method": "S256",
             "sessionToken": session_token,
-            "prompt": "none",
         }
         session = await self._get_session()
         try:
@@ -235,11 +244,12 @@ class OktaAuth(SessionOwner):
                 self.authorize_url, params=params, allow_redirects=False, timeout=self._timeout
             ) as resp:
                 location = resp.headers.get("Location")
+                status = resp.status
                 body = await resp.text()
         except (aiohttp.ClientError, asyncio.TimeoutError) as err:
             raise EngieNetworkError(f"Okta authorize request failed: {err}") from err
         if not location:
-            raise EngieAuthError(f"Okta authorize did not redirect (HTTP {resp.status}): {body[:200]}")
+            raise EngieAuthError(f"Okta authorize did not redirect (HTTP {status}): {body[:200]}")
         return self._code_from_callback(location, expected_state=state)
 
     def begin_browser_login(self) -> BrowserLogin:

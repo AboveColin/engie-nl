@@ -43,6 +43,7 @@ async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--browser", action="store_true", help="browser PKCE flow (works with MFA)")
     parser.add_argument("--try-password-grant", action="store_true", help="try the ROPC grant first and report")
+    parser.add_argument("--check", action="store_true", help="only try the password step and report what Okta says")
     args = parser.parse_args()
 
     async with OktaAuth() as auth:
@@ -57,6 +58,22 @@ async def main() -> int:
 
         username = input("Mijn ENGIE username (email): ").strip()
         password = getpass.getpass("password: ")
+
+        if args.check:
+            # Stops after the password step, so a refusal names Okta's own code
+            # instead of being blamed on the authorize or exchange that follows.
+            try:
+                token = await auth.authn(username, password)
+            except EngieMfaRequiredError as err:
+                print(f"password: accepted, but Okta wants a second factor ({err.status})")
+                print(f"  factors: {[f.get('factorType') for f in err.factors]}")
+                print("  use: python scripts/login.py --browser")
+                return 2
+            except EngieAuthError as err:
+                print(f"password: REFUSED. {err}")
+                return 1
+            print(f"password: accepted, sessionToken is {len(token)} chars")
+            return 0
 
         if args.try_password_grant:
             try:
