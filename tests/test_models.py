@@ -4,7 +4,19 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from engie_nl.models import Consumption, Mandate, MerPeriod, Reading, Register, _bool, _date, _dt, _int, _num
+from engie_nl.models import (
+    Consumption,
+    Mandate,
+    MerPeriod,
+    MeteringPoint,
+    Reading,
+    Register,
+    _bool,
+    _date,
+    _dt,
+    _int,
+    _num,
+)
 
 
 def test_num_int_bool_tolerate_strings_and_empties() -> None:
@@ -46,3 +58,15 @@ def test_mandate_active_needs_version_and_no_end() -> None:
 def test_mer_period_accepts_both_spellings() -> None:
     assert MerPeriod.from_api({"id": "a", "startDate": "2026-08-01"}).start_date == date(2026, 8, 1)
     assert MerPeriod.from_api({"id": "a", "start_date": "2026-08-01"}).start_date == date(2026, 8, 1)
+
+
+def test_engie_writes_an_unset_date_as_year_one() -> None:
+    """The live /user record uses 0001-01-01T00:00:00+00:19 to mean "no data yet"."""
+    point = MeteringPoint.from_api(
+        {"ean": "871694840000000001", "type": "ELK", "has_data": False,
+         "data_from": "0001-01-01T00:00:00+00:19", "data_to": "0001-01-01T00:00:00+00:19",
+         "start_date": "2026-09-09T02:00:00+02:00"}
+    )
+    assert point.data_from is None
+    assert point.data_to is None
+    assert point.start_date == date(2026, 9, 9)

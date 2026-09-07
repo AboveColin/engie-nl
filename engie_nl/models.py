@@ -54,15 +54,25 @@ def _bool(value: Any) -> bool | None:
     return None
 
 
+# ENGIE writes an unset date as year one, carried over from a .NET DateTime
+# default: the live /user record answers "0001-01-01T00:00:00+00:19" for
+# data_from and data_to on a connection that has no data yet (measured
+# 2026-09-07). The +00:19 is Amsterdam local mean time, which is what a
+# zero-valued timestamp renders as in that timezone. Parsing it succeeds and
+# yields a date no reader wants, so treat anything that old as unset.
+_EPOCH_SENTINEL_YEAR = 1900
+
+
 def _dt(value: Any) -> datetime | None:
     """Parse the gateway's ISO-8601 timestamps (``2026-09-01T00:00:00+02:00``)."""
     text = _str(value)
     if text is None:
         return None
     try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
         return None
+    return None if parsed.year < _EPOCH_SENTINEL_YEAR else parsed
 
 
 def _date(value: Any) -> date | None:
@@ -73,9 +83,10 @@ def _date(value: Any) -> date | None:
     if len(text) < 10:
         return None
     try:
-        return date.fromisoformat(text[:10])
+        parsed = date.fromisoformat(text[:10])
     except ValueError:
         return None
+    return None if parsed.year < _EPOCH_SENTINEL_YEAR else parsed
 
 
 def _list(value: Any) -> list[Any]:
@@ -87,7 +98,15 @@ def _dict(value: Any) -> dict[str, Any]:
 
 
 class EnergyType(StrEnum):
-    """The gateway's one-letter energy type, used by the day-ahead endpoint."""
+    """The energy type the day-ahead endpoint takes in its ``type`` query.
+
+    The gateway is not symmetric here. It accepts the one-letter form on the
+    way in and answers with the three-letter one: a request for ``type=E``
+    came back with 25 rows each carrying ``"type": "ELK"`` (measured
+    2026-09-07). ``/api/v1/user`` uses the same three-letter spelling, ``ELK``
+    and ``GAS``, in its metering points. Compare a returned type as a string,
+    not against this enum.
+    """
 
     ELECTRICITY = "E"
     GAS = "G"
@@ -180,9 +199,16 @@ class Tariffs:
 class MeteringPoint:
     """One EAN on a delivery address.
 
-    ``kind`` is the gateway's ``type`` field. Its value set is not enumerated in
-    the app; expect ``E`` and ``G`` or spelled-out words, and read ``raw`` if a
-    new value shows up. ``smart`` says whether P4 (smart meter) data flows.
+    ``kind`` is the gateway's ``type`` field. The app does not enumerate its
+    values; the live gateway answered ``ELK`` and ``GAS`` (measured
+    2026-09-07). Match it case-insensitively against a set of accepted
+    spellings and read ``raw`` if a new one shows up.
+
+    ``smart`` says whether the meter is a smart meter. ``has_data`` says
+    whether ENGIE actually has readings for it, which is a different question:
+    before a contract's start date both metering points here were
+    ``smart: True, readable: True, has_data: False``, and every data endpoint
+    answered an error for them. Check ``has_data`` before asking for data.
     """
 
     ean: str
@@ -596,6 +622,12 @@ class DayAheadPrice:
 
     ``price`` is ``bare_tariff_per_unit`` (VAT included), ``price_ex`` the
     same without VAT. Neither includes energiebelasting or the supplier fee.
+
+    ``energy_type`` is the gateway's own spelling of the type, which is not
+    the one the query takes: see :class:`EnergyType`. Electricity returned 25
+    hourly rows for a single day on 2026-09-07, one per hour plus the DST-free
+    day's 25th, while gas returned an empty list on an account with no
+    dynamic gas contract.
     """
 
     start: datetime | None
