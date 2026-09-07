@@ -8,7 +8,10 @@ answered badly (retry later). Each gets its own type.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
+
+if TYPE_CHECKING:
+    from .auth import EmailChallenge
 
 
 class EngieError(Exception):
@@ -35,6 +38,20 @@ class EngieMfaRequiredError(EngieAuthError):
         super().__init__(message)
         self.status = status
         self.factors = factors or []
+
+
+class EngieEmailCodeRequired(EngieAuthError):
+    """The password was accepted and Okta has emailed a one-time code.
+
+    This is not a rejection: the login is half done and the code is already in
+    the mailbox. Hand ``challenge`` and the code to
+    :meth:`~engie_nl.auth.OktaAuth.submit_email_code` to finish. Starting over
+    instead sends a second code and invalidates this one.
+    """
+
+    def __init__(self, message: str, challenge: "EmailChallenge") -> None:
+        super().__init__(message)
+        self.challenge = challenge
 
 
 class EngieApiError(EngieError):

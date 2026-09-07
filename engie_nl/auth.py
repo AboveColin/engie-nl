@@ -60,7 +60,12 @@ from .constants import (
     TOKEN_REFRESH_MARGIN,
 )
 from ._http import SessionOwner, json_or_text
-from .exceptions import EngieAuthError, EngieMfaRequiredError, EngieNetworkError
+from .exceptions import (
+    EngieAuthError,
+    EngieEmailCodeRequired,
+    EngieMfaRequiredError,
+    EngieNetworkError,
+)
 
 
 def _b64url(raw: bytes) -> str:
@@ -138,6 +143,20 @@ class TokenSet:
 
 
 @dataclass
+class EmailChallenge:
+    """A login waiting on the one-time code Okta emailed.
+
+    ``verifier`` is the PKCE verifier of the transaction that is still open, so
+    the whole object has to survive between the two calls. It is short-lived:
+    Okta expires the transaction, and the code with it, within minutes.
+    """
+
+    state_handle: str
+    answer_href: str
+    verifier: str
+
+
+@dataclass
 class BrowserLogin:
     """What :meth:`OktaAuth.begin_browser_login` hands out.
 
@@ -200,14 +219,49 @@ class OktaAuth(SessionOwner):
     # --- flows -------------------------------------------------------------
 
     async def login(self, username: str, password: str) -> TokenSet:
-        """Log in with an email and password through the Identity Engine."""
+        """Log in with an email and password through the Identity Engine.
+
+        Raises :class:`EngieEmailCodeRequired` when the account carries a second
+        factor, which this ENGIE org does. The code is already sent by then:
+        this asks Okta to email it before raising, so the caller only has to
+        collect it and call :meth:`submit_email_code`.
+        """
         verifier, challenge = make_pkce_pair()
         handle = await self._interact(challenge)
         idx = await self._idx_post(self.idx_introspect_url, {"interactionHandle": handle}, "introspect")
         idx = await self._remediate(idx, "identify", {"identifier": username})
         if _remediation(idx, "challenge-authenticator") is None:
-            idx = await self._select_password(idx)
+            idx = await self._select_authenticator(idx, "password")
         idx = await self._remediate(idx, "challenge-authenticator", {"credentials": {"passcode": password}})
+
+        if "successWithInteractionCode" in idx:
+            return await self._exchange(idx, verifier)
+
+        # The password was accepted and Okta wants another factor. Send the code
+        # now rather than making the caller ask for it in a separate round trip.
+        if _authenticator_by_method(idx, "email") is None:
+            raise self._cannot_continue(idx, "an email code step")
+        idx = await self._select_authenticator(idx, "email")
+        raise EngieEmailCodeRequired(
+            "ENGIE emailed a one-time code to finish the login",
+            EmailChallenge(
+                state_handle=_state_handle(idx),
+                answer_href=_answer_href(idx),
+                verifier=verifier,
+            ),
+        )
+
+    async def submit_email_code(self, challenge: EmailChallenge, code: str) -> TokenSet:
+        """Finish a login that :meth:`login` stopped with :class:`EngieEmailCodeRequired`."""
+        idx = await self._idx_post(
+            challenge.answer_href,
+            {"credentials": {"passcode": code.strip()}, "stateHandle": challenge.state_handle},
+            "email code",
+        )
+        return await self._exchange(idx, challenge.verifier)
+
+    async def _exchange(self, idx: dict[str, Any], verifier: str) -> TokenSet:
+        """Turn a finished IDX transaction into the token pair."""
         return await self._token_request(
             {
                 "grant_type": "interaction_code",
@@ -278,14 +332,12 @@ class OktaAuth(SessionOwner):
             raise EngieAuthError(f"Okta remediation {name} carries no href")
         return await self._idx_post(href, {**values, "stateHandle": _state_handle(idx)}, name)
 
-    async def _select_password(self, idx: dict[str, Any]) -> dict[str, Any]:
-        """Pick the password authenticator when Okta asks which one to use."""
-        authenticator_id = _password_authenticator_id(idx)
-        if authenticator_id is None:
-            raise self._cannot_continue(idx, "challenge-authenticator")
-        return await self._remediate(
-            idx, "select-authenticator-authenticate", {"authenticator": {"id": authenticator_id}}
-        )
+    async def _select_authenticator(self, idx: dict[str, Any], method_type: str) -> dict[str, Any]:
+        """Pick a named authenticator when Okta asks which one to use."""
+        picked = _authenticator_by_method(idx, method_type)
+        if picked is None:
+            raise self._cannot_continue(idx, f"the {method_type} authenticator")
+        return await self._remediate(idx, "select-authenticator-authenticate", {"authenticator": picked})
 
     def _cannot_continue(self, idx: dict[str, Any], wanted: str) -> EngieAuthError:
         """Turn a missing remediation into the most specific error the response supports."""
@@ -449,8 +501,12 @@ def _authenticator_options(idx: dict[str, Any]) -> list[str]:
     return [str(option.get("label")) for option in field.get("options", []) if isinstance(option, dict)]
 
 
-def _password_authenticator_id(idx: dict[str, Any]) -> str | None:
-    """The id of the password authenticator among the offered options."""
+def _authenticator_by_method(idx: dict[str, Any], method_type: str) -> dict[str, str] | None:
+    """The ``{id, methodType}`` Okta wants back for one offered authenticator.
+
+    Matched on ``methodType`` rather than the label, because the label is
+    localised and the method type is not.
+    """
     field = _authenticator_field(idx)
     if field is None:
         return None
@@ -461,11 +517,21 @@ def _password_authenticator_id(idx: dict[str, Any]) -> str | None:
         entries = {
             entry.get("name"): entry.get("value") for entry in form.get("value", []) if isinstance(entry, dict)
         }
-        if entries.get("methodType") == "password" or str(option.get("label", "")).lower() == "password":
-            identifier = entries.get("id")
-            if isinstance(identifier, str):
-                return identifier
+        if entries.get("methodType") != method_type:
+            continue
+        identifier = entries.get("id")
+        if isinstance(identifier, str):
+            return {"id": identifier, "methodType": method_type}
     return None
+
+
+def _answer_href(idx: dict[str, Any]) -> str:
+    """Where the next one-time code goes."""
+    step = _remediation(idx, "challenge-authenticator")
+    href = step.get("href") if step else None
+    if not isinstance(href, str) or not href:
+        raise EngieAuthError("Okta asked for a code but offered nowhere to send it")
+    return href
 
 
 def _interaction_code(idx: dict[str, Any]) -> str:

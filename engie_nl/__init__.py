@@ -1,10 +1,11 @@
 """engie-nl: async client for the private API behind the ENGIE Energie NL app."""
 
-from .auth import BrowserLogin, OktaAuth, TokenSet, make_pkce_pair
+from .auth import BrowserLogin, EmailChallenge, OktaAuth, TokenSet, make_pkce_pair
 from .client import EngieClient
 from .exceptions import (
     EngieApiError,
     EngieAuthError,
+    EngieEmailCodeRequired,
     EngieError,
     EngieMfaRequiredError,
     EngieNetworkError,
@@ -36,12 +37,14 @@ __version__ = "0.1.0"
 __all__ = [
     "__version__",
     "BrowserLogin",
+    "EmailChallenge",
     "OktaAuth",
     "TokenSet",
     "make_pkce_pair",
     "EngieClient",
     "EngieApiError",
     "EngieAuthError",
+    "EngieEmailCodeRequired",
     "EngieError",
     "EngieMfaRequiredError",
     "EngieNetworkError",

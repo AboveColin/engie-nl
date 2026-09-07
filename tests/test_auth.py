@@ -8,10 +8,19 @@ import time
 
 import pytest
 
-from engie_nl import EngieAuthError, EngieMfaRequiredError, OktaAuth, TokenSet, make_pkce_pair
+from engie_nl import (
+    EngieAuthError,
+    EngieEmailCodeRequired,
+    EngieMfaRequiredError,
+    OktaAuth,
+    TokenSet,
+    make_pkce_pair,
+)
 from tests.conftest import (
     ACCESS,
     CODE,
+    EMAIL_AUTHENTICATOR_ID,
+    EMAIL_CODE,
     INTERACTION_CODE,
     PASSWORD,
     PASSWORD_AUTHENTICATOR_ID,
@@ -110,7 +119,10 @@ async def test_login_selects_the_password_authenticator_when_asked(
     assert ts.access_token == ACCESS
     assert "/idp/idx/challenge" in okta_ok.paths
     select = okta_ok.jsons[2]
-    assert select == {"authenticator": {"id": PASSWORD_AUTHENTICATOR_ID}, "stateHandle": STATE_HANDLE}
+    assert select == {
+        "authenticator": {"id": PASSWORD_AUTHENTICATOR_ID, "methodType": "password"},
+        "stateHandle": STATE_HANDLE,
+    }
 
 
 async def test_login_without_a_password_option_raises_mfa(okta_ok: FakeServer, auth: OktaAuth) -> None:
@@ -146,6 +158,42 @@ async def test_extra_step_after_the_password_is_named(okta_ok: FakeServer, auth:
         method="POST",
     )
     with pytest.raises(EngieAuthError, match="select-authenticator-enroll"):
+        await auth.login(USERNAME, PASSWORD)
+
+
+async def test_login_stops_on_the_email_code_after_sending_it(okta_mfa: FakeServer, auth: OktaAuth) -> None:
+    """The real org's shape: password accepted, then a code that only the mailbox has."""
+    with pytest.raises(EngieEmailCodeRequired) as err:
+        await auth.login(USERNAME, PASSWORD)
+    challenge = err.value.challenge
+    assert challenge.answer_href.endswith("/idp/idx/challenge/answer")
+    assert challenge.state_handle == STATE_HANDLE
+
+    # login() must have asked Okta to send the mail before raising, or the user
+    # would be told to read a code that was never sent.
+    assert okta_mfa.jsons[-1] == {
+        "authenticator": {"id": EMAIL_AUTHENTICATOR_ID, "methodType": "email"},
+        "stateHandle": STATE_HANDLE,
+    }
+
+    ts = await auth.submit_email_code(challenge, f"  {EMAIL_CODE} ")
+    assert ts.access_token == ACCESS
+    exchange = okta_mfa.forms[-1]
+    assert exchange["grant_type"] == "interaction_code"
+    # The verifier must be the one from the first half, carried on the challenge.
+    assert _challenge_of(exchange["code_verifier"]) == okta_mfa.forms[0]["code_challenge"]
+
+
+async def test_wrong_email_code_reports_oktas_words(okta_mfa: FakeServer, auth: OktaAuth) -> None:
+    with pytest.raises(EngieEmailCodeRequired) as err:
+        await auth.login(USERNAME, PASSWORD)
+    with pytest.raises(EngieAuthError, match="Ongeldige code"):
+        await auth.submit_email_code(err.value.challenge, "000000")
+
+
+async def test_email_code_required_is_an_auth_error(okta_mfa: FakeServer, auth: OktaAuth) -> None:
+    """Callers that only catch EngieAuthError must not treat it as a crash."""
+    with pytest.raises(EngieAuthError):
         await auth.login(USERNAME, PASSWORD)
 
 

@@ -36,6 +36,7 @@ STATE_HANDLE = "sh-1"
 INTERACTION_CODE = "ic-1"
 PASSWORD_AUTHENTICATOR_ID = "autpassword1"
 EMAIL_AUTHENTICATOR_ID = "autemail1"
+EMAIL_CODE = "123456"
 
 Handler = Callable[[web.Request], Any]
 
@@ -238,6 +239,36 @@ def okta_ok(server: FakeServer) -> FakeServer:
     server.handle("POST", "/oauth2/default/v1/token", token)
     server.handle("GET", "/oauth2/default/v1/authorize", authorize)
     return server
+
+
+@pytest.fixture
+def okta_mfa(okta_ok: FakeServer) -> FakeServer:
+    """ENGIE's real shape: the password is accepted, then an emailed code is required.
+
+    One handler serves both answers because Okta uses the same href for the
+    password and for the code; the passcode value is what tells them apart.
+    """
+    base = okta_ok.url
+
+    def answer(_request: web.Request) -> web.Response:
+        passcode = okta_ok.jsons[-1].get("credentials", {}).get("passcode")
+        if passcode == PASSWORD:
+            return web.json_response(idx_body(base, select_authenticator(base, "Email")))
+        if passcode == EMAIL_CODE:
+            return web.json_response(idx_success())
+        return web.json_response(idx_error("Ongeldige code"), status=401)
+
+    def challenge(_request: web.Request) -> web.Response:
+        """Selecting the email authenticator makes Okta send the mail and ask for the code."""
+        return web.json_response(
+            idx_body(base, remediation("challenge-authenticator", base, "/idp/idx/challenge/answer",
+                                       [{"name": "credentials", "type": "object",
+                                         "form": {"value": [{"name": "passcode", "secret": True}]}}]))
+        )
+
+    okta_ok.handle("POST", "/idp/idx/challenge/answer", answer)
+    okta_ok.handle("POST", "/idp/idx/challenge", challenge)
+    return okta_ok
 
 
 @pytest_asyncio.fixture
