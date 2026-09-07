@@ -402,7 +402,15 @@ class ConsumptionSeries:
         err = data.get("error")
         error: str | None = None
         if isinstance(err, dict):
-            error = _str(err.get("fault_string")) or _str(err.get("detail")) or _str(err.get("details"))
+            # "message" is what the live gateway sends ({"message": "not-owned"}
+            # for a connection ENGIE does not supply yet); the other three come
+            # from the app's Error model.
+            error = (
+                _str(err.get("message"))
+                or _str(err.get("fault_string"))
+                or _str(err.get("detail"))
+                or _str(err.get("details"))
+            )
         elif err is not None:
             error = _str(err)
         return cls(

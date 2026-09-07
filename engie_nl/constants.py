@@ -81,4 +81,14 @@ OKTA_SCOPE = (
 # so a request never leaves with a token that dies in flight.
 TOKEN_REFRESH_MARGIN = 60
 
-DEFAULT_TIMEOUT = 30
+# Measured 2026-09-07 against the live gateway. /api/v1/user answers in 0.30 to
+# 2.49 s once warm, but the first calls after a fresh login ran past 25 s three
+# times in a row before one returned in 4.9 s; every other endpoint stayed under
+# 0.3 s throughout. 30 s turned that first call into a timeout and looked like a
+# blocked request. This is a tripwire, not a target: nothing healthy reaches it.
+DEFAULT_TIMEOUT = 60
+
+# The gateway stalls at random, so one attempt is not enough. See _get in
+# client.py for the measurements behind these two numbers.
+REQUEST_ATTEMPTS = 3
+RETRY_BACKOFF_SECONDS = 2.0

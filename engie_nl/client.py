@@ -39,6 +39,8 @@ from .auth import OktaAuth, TokenSet
 from .constants import (
     DATE_FORMAT,
     DEFAULT_TIMEOUT,
+    REQUEST_ATTEMPTS,
+    RETRY_BACKOFF_SECONDS,
     GATEWAY_HEADERS,
     GATEWAY_URL,
     PATH_CONSUMPTIONS,
@@ -103,8 +105,10 @@ class EngieClient(SessionOwner):
         on_tokens_updated: TokensCallback | None = None,
         base_url: str = GATEWAY_URL,
         timeout: float = DEFAULT_TIMEOUT,
+        retry_backoff: float = RETRY_BACKOFF_SECONDS,
     ) -> None:
         super().__init__(session, timeout)
+        self._retry_backoff = retry_backoff
         self.tokens: TokenSet = tokens
         self._auth = auth
         self._on_tokens_updated = on_tokens_updated
@@ -134,7 +138,32 @@ class EngieClient(SessionOwner):
             await self.refresh_tokens()
         return {**GATEWAY_HEADERS, "Authorization": f"Bearer {self.tokens.access_token}"}
 
-    async def _get(self, path: str, params: Params | None = None, *, retry_on_401: bool = True) -> Any:
+    async def _get(self, path: str, params: Params | None = None) -> Any:
+        """GET one path, retrying when the gateway does not answer.
+
+        Measured 2026-09-07 against the live gateway: its latency is erratic and
+        not tied to the endpoint, the headers or the client. ``/api/v1/user``
+        answered in 0.62 s, then twice not at all within 45 s, then in 0.49 s,
+        with identical headers inside one minute. ``/api/v1/documents`` took
+        12.5 s once and 0.14 s otherwise. Every stall came after the request
+        headers were sent, with DNS and connect both under 0.1 s, so nothing
+        local explains it.
+
+        One attempt therefore loses a poll often enough to matter. A timeout is
+        retried; a real answer, including an error status, is not, because the
+        gateway means those.
+        """
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                return await self._get_once(path, params)
+            except EngieNetworkError:
+                if attempt >= REQUEST_ATTEMPTS:
+                    raise
+                await asyncio.sleep(self._retry_backoff * attempt)
+
+    async def _get_once(self, path: str, params: Params | None = None, *, retry_on_401: bool = True) -> Any:
         session = await self._get_session()
         url = f"{self._base_url}{path}"
         headers = await self._headers()
@@ -143,10 +172,10 @@ class EngieClient(SessionOwner):
                 body = await json_or_text(resp)
                 status = resp.status
         except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-            raise EngieNetworkError(f"GET {path} failed: {err}") from err
+            raise EngieNetworkError(f"GET {path} failed: {err or type(err).__name__}") from err
         if status == 401 and retry_on_401 and self._auth is not None:
             await self.refresh_tokens()
-            return await self._get(path, params, retry_on_401=False)
+            return await self._get_once(path, params, retry_on_401=False)
         if status == 401:
             raise EngieAuthError("the gateway rejected the access token")
         if status >= 400:

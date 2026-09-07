@@ -2,12 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date
 
 import pytest
 
-from engie_nl import EngieApiError, EngieAuthError, EngieClient, EnergyType, TokenSet, TransactionStatus
+from engie_nl import (
+    EngieApiError,
+    EngieAuthError,
+    EngieClient,
+    EngieNetworkError,
+    EnergyType,
+    TokenSet,
+    TransactionStatus,
+)
 from engie_nl.constants import APP_VERSION_CODE
+from aiohttp import web
+
 from tests.conftest import ACCESS, FakeServer, query_of
 
 EAN_E = "871694840000000001"
@@ -211,3 +222,57 @@ async def test_expired_token_without_auth_is_auth_error(server: FakeServer) -> N
     async with EngieClient(stale, base_url=server.url, timeout=5) as c:
         with pytest.raises(EngieAuthError):
             await c.get_user()
+
+
+async def test_get_retries_a_stalled_request(server: FakeServer, tokens: TokenSet) -> None:
+    """The gateway stalls at random; one attempt would lose the poll."""
+    calls = {"n": 0}
+
+    async def flaky(_request: web.Request) -> web.Response:
+        calls["n"] += 1
+        if calls["n"] < 3:
+            await asyncio.sleep(0.4)
+        return web.json_response({"customer_id": "K1"})
+
+    server.handle("GET", "/api/v1/user", flaky)
+    async with EngieClient(tokens, base_url=server.url, timeout=0.1, retry_backoff=0) as client:
+        user = await client.get_user()
+    assert user.customer_id == "K1"
+    assert calls["n"] == 3
+
+
+async def test_get_gives_up_after_three_attempts(server: FakeServer, tokens: TokenSet) -> None:
+    calls = {"n": 0}
+
+    async def always_slow(_request: web.Request) -> web.Response:
+        calls["n"] += 1
+        await asyncio.sleep(0.4)
+        return web.json_response({})
+
+    server.handle("GET", "/api/v1/user", always_slow)
+    async with EngieClient(tokens, base_url=server.url, timeout=0.1, retry_backoff=0) as client:
+        with pytest.raises(EngieNetworkError):
+            await client.get_user()
+    assert calls["n"] == 3
+
+
+async def test_an_error_status_is_not_retried(server: FakeServer, tokens: TokenSet) -> None:
+    """A 500 is the gateway's answer, not a stall; retrying it only doubles the load."""
+    calls = {"n": 0}
+
+    def failing(_request: web.Request) -> web.Response:
+        calls["n"] += 1
+        return web.json_response({"fault_string": "boom"}, status=500)
+
+    server.handle("GET", "/api/v1/user", failing)
+    async with EngieClient(tokens, base_url=server.url, timeout=5, retry_backoff=0) as client:
+        with pytest.raises(EngieApiError):
+            await client.get_user()
+    assert calls["n"] == 1
+
+
+async def test_consumption_error_reads_the_live_message_key(server: FakeServer, client: EngieClient) -> None:
+    """The live gateway sends {"message": "not-owned"}, not the app's fault_string."""
+    server.json("/api/v1/consumptions", [{"ean": EAN_E, "data": [], "error": {"message": "not-owned"}}])
+    series = await client.get_consumptions(EAN_E, days=1)
+    assert series[0].error == "not-owned"
