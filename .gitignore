@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.DS_Store
+
+# Live-test artefacts. Tokens never enter the repo; fixtures are added by hand
+# after redaction (scripts/probe.py writes to tests/fixtures/_live/, ignored).
+tests/fixtures/_live/
+*.tokens.json

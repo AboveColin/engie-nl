@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "engie-nl"
+version = "0.1.0"
+description = "Async Python client for the private API behind the ENGIE Energie NL app"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.12"
+authors = [{ name = "AboveColin" }]
+keywords = ["engie", "energy", "netherlands", "home-assistant", "smart-meter"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Home Automation",
+    "Typing :: Typed",
+]
+dependencies = ["aiohttp>=3.9"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "pylint>=3", "mypy>=1.8"]
+
+[project.urls]
+Homepage = "https://github.com/AboveColin/engie-nl"
+Issues = "https://github.com/AboveColin/engie-nl/issues"
+
+[tool.setuptools.packages.find]
+include = ["engie_nl*"]
+
+[tool.setuptools.package-data]
+engie_nl = ["py.typed"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
