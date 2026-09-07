@@ -130,6 +130,25 @@ async def test_login_with_no_usable_remediation_says_what_was_offered(
         await auth.login(USERNAME, PASSWORD)
 
 
+async def test_idx_400_without_a_message_is_still_a_failure(okta_ok: FakeServer, auth: OktaAuth) -> None:
+    """A body Okta cannot parse answers 400 with no messages; that is not progress."""
+    okta_ok.json("/idp/idx/challenge/answer", idx_body(okta_ok.url), status=400, method="POST")
+    with pytest.raises(EngieAuthError, match="HTTP 400"):
+        await auth.login(USERNAME, PASSWORD)
+
+
+async def test_extra_step_after_the_password_is_named(okta_ok: FakeServer, auth: OktaAuth) -> None:
+    """If Okta wants an enrollment after the password, say which one."""
+    base = okta_ok.url
+    okta_ok.json(
+        "/idp/idx/challenge/answer",
+        idx_body(base, remediation("select-authenticator-enroll", base, "/idp/idx/credential/enroll", [])),
+        method="POST",
+    )
+    with pytest.raises(EngieAuthError, match="select-authenticator-enroll"):
+        await auth.login(USERNAME, PASSWORD)
+
+
 async def test_interact_refusal_is_an_auth_error(okta_ok: FakeServer, auth: OktaAuth) -> None:
     okta_ok.json("/oauth2/default/v1/interact", {"error": "invalid_client"}, status=400, method="POST")
     with pytest.raises(EngieAuthError, match="refused to start a login"):

@@ -203,7 +203,7 @@ class OktaAuth(SessionOwner):
         """Log in with an email and password through the Identity Engine."""
         verifier, challenge = make_pkce_pair()
         handle = await self._interact(challenge)
-        idx = await self._idx_post(self.idx_introspect_url, {"interactionHandle": handle})
+        idx = await self._idx_post(self.idx_introspect_url, {"interactionHandle": handle}, "introspect")
         idx = await self._remediate(idx, "identify", {"identifier": username})
         if _remediation(idx, "challenge-authenticator") is None:
             idx = await self._select_password(idx)
@@ -240,11 +240,15 @@ class OktaAuth(SessionOwner):
             raise EngieAuthError(f"Okta refused to start a login (HTTP {status}): {str(data)[:200]}")
         return str(data["interaction_handle"])
 
-    async def _idx_post(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
-        """POST one IDX step.
+    async def _idx_post(self, url: str, payload: dict[str, Any], step: str) -> dict[str, Any]:
+        """POST one IDX step and return its body, raising unless the login moved on.
 
-        A 4xx still carries the remediation body (a wrong password comes back as
-        401 with the reason in ``messages``), so the status is not an error here.
+        A failed step still carries a full IDX body, so the status is what
+        decides and the message only sharpens the wording. Measured on
+        2026-09-07: a wrong password is expected to come back as 401 with the
+        reason in ``messages``, while a body Okta cannot parse comes back as 400
+        with no ``messages`` at all. Checking only for a message let that 400
+        through as success.
         """
         session = await self._get_session()
         try:
@@ -257,6 +261,11 @@ class OktaAuth(SessionOwner):
             raise EngieNetworkError(f"Okta IDX request failed: {err}") from err
         if not isinstance(data, dict):
             raise EngieAuthError(f"Okta IDX returned a non-JSON body (HTTP {status}): {str(data)[:200]}")
+        errors = _idx_messages(data)
+        if errors:
+            raise EngieAuthError(f"Okta refused the {step} step: {errors}")
+        if status >= 400:
+            raise EngieAuthError(f"Okta refused the {step} step with HTTP {status} and gave no reason")
         return data
 
     async def _remediate(self, idx: dict[str, Any], name: str, values: dict[str, Any]) -> dict[str, Any]:
@@ -267,11 +276,7 @@ class OktaAuth(SessionOwner):
         href = step.get("href")
         if not isinstance(href, str) or not href:
             raise EngieAuthError(f"Okta remediation {name} carries no href")
-        result = await self._idx_post(href, {**values, "stateHandle": _state_handle(idx)})
-        errors = _idx_messages(result)
-        if errors:
-            raise EngieAuthError(f"Okta refused the {name} step: {errors}")
-        return result
+        return await self._idx_post(href, {**values, "stateHandle": _state_handle(idx)}, name)
 
     async def _select_password(self, idx: dict[str, Any]) -> dict[str, Any]:
         """Pick the password authenticator when Okta asks which one to use."""
@@ -472,4 +477,13 @@ def _interaction_code(idx: dict[str, Any]) -> str:
             code = field.get("value")
             if isinstance(code, str) and code:
                 return code
-    raise EngieAuthError("Okta finished the login without an interaction code")
+    block = idx.get("remediation")
+    offered = [
+        str(step.get("name"))
+        for step in (block.get("value", []) if isinstance(block, dict) else [])
+        if isinstance(step, dict)
+    ]
+    raise EngieAuthError(
+        "Okta accepted the password but did not finish the login; it now asks for "
+        f"{offered or 'nothing this client understands'}"
+    )
