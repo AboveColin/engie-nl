@@ -402,17 +402,28 @@ class OktaAuth(SessionOwner):
         )
 
     async def refresh(self, tokens: TokenSet) -> TokenSet:
-        """Get a fresh access token. Okta may rotate the refresh token; keep the returned one."""
+        """Get a fresh access token. Okta may rotate the refresh token; keep the returned one.
+
+        The refresh asks for the scope the grant actually has, not the scope the
+        app requests. ENGIE's org grants a subset: the app asks for
+        ``okta.myAccount.password.manage`` and ``okta.myAccount.password.read``
+        and the token comes back with ``offline_access email profile openid``.
+        Asking for the full set on refresh is refused with HTTP 400
+        ``access_denied``, "Some of the scopes requested for the refresh request
+        were not granted in the original authorize request" (measured
+        2026-09-08 against a real session). Every session would die at its first
+        refresh, an hour in, which is late enough to look like something else.
+        """
         if not tokens.refresh_token:
             raise EngieAuthError("no refresh token; log in again")
-        new = await self._token_request(
-            {
-                "grant_type": "refresh_token",
-                "client_id": self.client_id,
-                "scope": self.scope,
-                "refresh_token": tokens.refresh_token,
-            }
-        )
+        form = {
+            "grant_type": "refresh_token",
+            "client_id": self.client_id,
+            "refresh_token": tokens.refresh_token,
+        }
+        if tokens.scope:
+            form["scope"] = tokens.scope
+        new = await self._token_request(form)
         if new.refresh_token is None:
             new.refresh_token = tokens.refresh_token
         return new

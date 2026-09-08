@@ -21,8 +21,15 @@ the bearer. When the token is within :data:`TOKEN_REFRESH_MARGIN` of expiry, or
 the gateway answers 401, it refreshes once through the :class:`OktaAuth` it was
 given and calls ``on_tokens_updated`` so the caller can persist the new pair.
 
-Every method here is a read. The gateway's write endpoints (meter readings,
-prepayment, payment info, mandates, contract moves) are deliberately absent.
+The methods on the client itself are the reads a household polls. The rest of
+the mapped API, 148 verb+path pairs in all, hangs off it in groups:
+``client.tariffs``, ``client.meter``, ``client.billing``, ``client.account``,
+``client.mandates``, ``client.assets``, ``client.enode``,
+``client.smart_charging``, ``client.happy_hour``, ``client.solar``,
+``client.address``, ``client.support`` and ``client.ev``.
+
+Anything that changes the account is refused unless the client was built with
+``allow_writes=True``. See :class:`~engie_nl.exceptions.EngieWriteBlocked`.
 """
 
 from __future__ import annotations
@@ -34,7 +41,24 @@ from typing import Any
 
 import aiohttp
 
-from ._http import SessionOwner, json_or_text
+from ._http import SessionOwner, send
+from ._parse import Params, as_dicts, eans_param
+from .api import (
+    AccountApi,
+    AddressApi,
+    AssetsApi,
+    BillingApi,
+    EnodeApi,
+    EvApi,
+    HappyHourApi,
+    LegacyApi,
+    MandatesApi,
+    MeterApi,
+    SmartChargingApi,
+    SolarApi,
+    SupportApi,
+    TariffsApi,
+)
 from .auth import OktaAuth, TokenSet
 from .constants import (
     DATE_FORMAT,
@@ -55,7 +79,7 @@ from .constants import (
     PATH_TRANSACTIONS,
     PATH_USER,
 )
-from .exceptions import EngieApiError, EngieAuthError, EngieNetworkError
+from .exceptions import EngieApiError, EngieAuthError, EngieNetworkError, EngieWriteBlocked
 from .models import (
     ConsumptionSeries,
     DayAheadPrice,
@@ -71,18 +95,10 @@ from .models import (
 )
 
 TokensCallback = Callable[[TokenSet], Awaitable[None] | None]
-Params = list[tuple[str, str]]
 
 
 def _fmt(day: date) -> str:
     return day.strftime(DATE_FORMAT)
-
-
-def _eans(eans: Iterable[str] | str) -> Params:
-    values = [eans] if isinstance(eans, str) else list(eans)
-    if not values:
-        raise ValueError("at least one EAN is required")
-    return [("eans[]", ean) for ean in values]
 
 
 def _window(start: date | None, end: date | None, days: int) -> tuple[date, date]:
@@ -106,14 +122,31 @@ class EngieClient(SessionOwner):
         base_url: str = GATEWAY_URL,
         timeout: float = DEFAULT_TIMEOUT,
         retry_backoff: float = RETRY_BACKOFF_SECONDS,
+        allow_writes: bool = False,
     ) -> None:
         super().__init__(session, timeout)
         self._retry_backoff = retry_backoff
+        self.allow_writes = allow_writes
         self.tokens: TokenSet = tokens
         self._auth = auth
         self._on_tokens_updated = on_tokens_updated
         self._base_url = base_url.rstrip("/")
         self._refresh_lock = asyncio.Lock()
+
+        self.account = AccountApi(self)
+        self.address = AddressApi(self)
+        self.assets = AssetsApi(self)
+        self.billing = BillingApi(self)
+        self.enode = EnodeApi(self)
+        self.ev = EvApi(self)
+        self.happy_hour = HappyHourApi(self)
+        self.legacy = LegacyApi(self)
+        self.mandates = MandatesApi(self)
+        self.meter = MeterApi(self)
+        self.smart_charging = SmartChargingApi(self)
+        self.solar = SolarApi(self)
+        self.support = SupportApi(self)
+        self.tariffs = TariffsApi(self)
 
     async def __aenter__(self) -> EngieClient:
         return self
@@ -153,33 +186,86 @@ class EngieClient(SessionOwner):
         retried; a real answer, including an error status, is not, because the
         gateway means those.
         """
+        return await self._request("GET", path, params=params)
+
+    async def _write(
+        self,
+        verb: str,
+        path: str,
+        *,
+        params: Params | None = None,
+        form: Params | None = None,
+        json_body: Any = None,
+        headers: dict[str, str] | None = None,
+    ) -> Any:
+        """Send a request that changes the account, if this client may.
+
+        The gate is here rather than in each method so a new endpoint cannot
+        forget it. Two POSTs are queries despite the verb and call
+        :meth:`_request` directly: ``/api/v1/readings`` and
+        ``/api/v1/p4-errors`` both send a body to read P4 data back.
+        """
+        if not self.allow_writes:
+            raise EngieWriteBlocked(
+                f"{verb} {path} changes the account; "
+                "construct EngieClient(..., allow_writes=True) to permit it"
+            )
+        return await self._request(verb, path, params=params, form=form, json_body=json_body, headers=headers)
+
+    async def _request(
+        self,
+        verb: str,
+        path: str,
+        *,
+        params: Params | None = None,
+        form: Params | None = None,
+        json_body: Any = None,
+        headers: dict[str, str] | None = None,
+    ) -> Any:
         attempt = 0
         while True:
             attempt += 1
             try:
-                return await self._get_once(path, params)
+                return await self._request_once(
+                    verb, path, params=params, form=form, json_body=json_body, headers=headers
+                )
             except EngieNetworkError:
                 if attempt >= REQUEST_ATTEMPTS:
                     raise
                 await asyncio.sleep(self._retry_backoff * attempt)
 
-    async def _get_once(self, path: str, params: Params | None = None, *, retry_on_401: bool = True) -> Any:
+    async def _request_once(
+        self,
+        verb: str,
+        path: str,
+        *,
+        params: Params | None = None,
+        form: Params | None = None,
+        json_body: Any = None,
+        headers: dict[str, str] | None = None,
+        retry_on_401: bool = True,
+    ) -> Any:
         session = await self._get_session()
-        url = f"{self._base_url}{path}"
-        headers = await self._headers()
-        try:
-            async with session.get(url, params=params, headers=headers, timeout=self._timeout) as resp:
-                body = await json_or_text(resp)
-                status = resp.status
-        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-            raise EngieNetworkError(f"GET {path} failed: {err or type(err).__name__}") from err
+        status, body = await send(
+            session,
+            verb,
+            f"{self._base_url}{path}",
+            params=params,
+            form=form,
+            json_body=json_body,
+            headers={**await self._headers(), **(headers or {})},
+            timeout=self._timeout,
+        )
         if status == 401 and retry_on_401 and self._auth is not None:
             await self.refresh_tokens()
-            return await self._get_once(path, params, retry_on_401=False)
+            return await self._request_once(
+                verb, path, params=params, form=form, json_body=json_body,
+                headers=headers, retry_on_401=False,
+            )
         if status == 401:
             raise EngieAuthError("the gateway rejected the access token")
         if status >= 400:
-            raise EngieApiError(f"GET {path} failed", status=status, body=body)
+            raise EngieApiError(f"{verb} {path} failed", status=status, body=body)
         return body
 
     # --- reads ---------------------------------------------------------------
@@ -201,9 +287,9 @@ class EngieClient(SessionOwner):
     ) -> list[ConsumptionSeries]:
         """Daily consumption per EAN. Defaults to the last ``days`` days up to today."""
         start, end = _window(start, end, days)
-        params: Params = [("from", _fmt(start)), ("to", _fmt(end)), *_eans(eans)]
+        params: Params = [("from", _fmt(start)), ("to", _fmt(end)), *eans_param(eans)]
         data = await self._get(PATH_CONSUMPTIONS, params)
-        return [ConsumptionSeries.from_api(d) for d in _as_list(data)]
+        return [ConsumptionSeries.from_api(d) for d in as_dicts(data)]
 
     async def get_meter_readings(
         self,
@@ -215,13 +301,13 @@ class EngieClient(SessionOwner):
     ) -> list[MeterReadings]:
         """Meter readings (meterstanden) per EAN and register."""
         start, end = _window(start, end, days)
-        params: Params = [*_eans(eans), ("start_date", _fmt(start)), ("end_date", _fmt(end))]
+        params: Params = [*eans_param(eans), ("start_date", _fmt(start)), ("end_date", _fmt(end))]
         data = await self._get(PATH_METER_READINGS, params)
-        return [MeterReadings.from_api(d) for d in _as_list(data)]
+        return [MeterReadings.from_api(d) for d in as_dicts(data)]
 
     async def get_estimations(self, eans: Iterable[str] | str, *, amount: int) -> EstimationCosts:
         """Termijnbedrag advice for the given monthly ``amount`` in whole euros."""
-        params: Params = [("amount", str(int(amount))), *_eans(eans)]
+        params: Params = [("amount", str(int(amount))), *eans_param(eans)]
         data = await self._get(PATH_ESTIMATIONS, params)
         if not isinstance(data, dict):
             raise EngieApiError("unexpected /estimations body", status=200, body=data)
@@ -231,24 +317,24 @@ class EngieClient(SessionOwner):
         """Invoices and payments."""
         data = await self._get(PATH_TRANSACTIONS)
         items = data.get("transactions") if isinstance(data, dict) else data
-        return [Transaction.from_api(d) for d in _as_list(items)]
+        return [Transaction.from_api(d) for d in as_dicts(items)]
 
     async def get_documents(self) -> list[DocumentRef]:
         """Document references (invoices, contracts); the PDF itself is ``/api/v2/document/{ref}``."""
         data = await self._get(PATH_DOCUMENTS)
         items = data.get("documents") if isinstance(data, dict) else data
-        return [DocumentRef.from_api(d) for d in _as_list(items)]
+        return [DocumentRef.from_api(d) for d in as_dicts(items)]
 
     async def get_mandates(self, eans: Iterable[str] | str) -> list[Mandate]:
         """Smart-meter data mandate status per EAN."""
-        data = await self._get(PATH_MANDATES, _eans(eans))
-        return [Mandate.from_api(d) for d in _as_list(data)]
+        data = await self._get(PATH_MANDATES, eans_param(eans))
+        return [Mandate.from_api(d) for d in as_dicts(data)]
 
     async def get_outages(self, customer_id: str | None = None) -> list[OutageMessage]:
         """Storingen and maintenance notices, optionally filtered to one customer."""
         params: Params = [("customerId", customer_id)] if customer_id else []
         data = await self._get(PATH_OUTAGES, params or None)
-        return [OutageMessage.from_api(d) for d in _as_list(data)]
+        return [OutageMessage.from_api(d) for d in as_dicts(data)]
 
     async def get_day_ahead_prices(
         self,
@@ -262,21 +348,13 @@ class EngieClient(SessionOwner):
         end = end or start + timedelta(days=1)
         params: Params = [("type", str(energy_type)), ("start_date", _fmt(start)), ("end_date", _fmt(end))]
         data = await self._get(PATH_DAY_AHEAD, params)
-        return [DayAheadPrice.from_api(d) for d in _as_list(data)]
+        return [DayAheadPrice.from_api(d) for d in as_dicts(data)]
 
     async def get_mer_periods(self) -> list[MerPeriod]:
         """Periods for which a monthly energy report (MER) exists."""
         data = await self._get(PATH_MER_PERIODS)
-        return [MerPeriod.from_api(d) for d in _as_list(data)]
+        return [MerPeriod.from_api(d) for d in as_dicts(data)]
 
     async def get_opening_hours(self) -> Any:
         """Customer service opening hours, returned raw (no model yet)."""
         return await self._get(PATH_OPENING_HOURS)
-
-
-def _as_list(data: Any) -> list[dict[str, Any]]:
-    if isinstance(data, list):
-        return [d for d in data if isinstance(d, dict)]
-    if isinstance(data, dict) and isinstance(data.get("data"), list):
-        return [d for d in data["data"] if isinstance(d, dict)]
-    return []

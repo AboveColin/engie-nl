@@ -50,6 +50,14 @@ PATH_DAY_AHEAD = "/api/v1/tariffs/day-ahead"
 PATH_OPENING_HOURS = "/api/v1/opening-hours"
 PATH_WAITING_TIME = "/api/v1/opening-hours/waiting-time"
 
+# --- Net2Grid (the ENGIE P1 dongle) -----------------------------------------
+
+# A different vendor on a different host. The key is compiled into the public
+# APK and identifies the app; the per-customer bearer comes from trading an Okta
+# access token at /v3/sso/exchange-token.
+NET2GRID_URL = "https://api.n2g-engie-nl-gen2.net"
+NET2GRID_API_KEY = "e5A19ozDRxCgb9f"
+
 # --- Okta -------------------------------------------------------------------
 
 OKTA_ORG_URL = "https://login.engie.nl"
@@ -76,6 +84,12 @@ OKTA_SCOPE = (
     "openid email profile offline_access "
     "okta.myAccount.password.manage okta.myAccount.password.read"
 )
+
+# The gateway's own pre-Okta client credentials, compiled into the public APK.
+# They identify the app, not a person. The app declares them and never sends
+# them: the password grant they belong to has no call site in 6.9.2.
+MGW_CLIENT_ID = "1"
+MGW_CLIENT_SECRET = "aslkdfj209sadlh09usadfpsodj2dcmnbcx"
 
 # Okta access tokens are short-lived; refresh this many seconds before expiry
 # so a request never leaves with a token that dies in flight.

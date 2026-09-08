@@ -66,9 +66,49 @@ class EngieApiError(EngieError):
         self.status = status
         self.body = body
 
+    @property
+    def detail(self) -> str | None:
+        """ENGIE's own explanation, whichever of its four shapes it arrived in.
+
+        The gateway has no single error format. Measured 2026-09-07 and
+        2026-09-08 on one account: ``{"message": "not-owned"}`` per EAN from
+        /consumptions, ``{"message": "Request contains EAN (...) that does not
+        belong to the user."}`` from /tariffs, ``{"fault_string":
+        "TechnicalError", "detail": {...}}`` from /estimations, and a Laravel
+        validation body ``{"message": ..., "errors": {"date_from": [...]}}``
+        from /tariffs with no dates.
+        """
+        if not isinstance(self.body, dict):
+            return str(self.body) if self.body else None
+        errors = self.body.get("errors")
+        if isinstance(errors, dict):
+            flat = [str(m) for msgs in errors.values() for m in (msgs if isinstance(msgs, list) else [msgs])]
+            if flat:
+                return "; ".join(flat)
+        for key in ("message", "fault_string", "error_description", "error"):
+            value = self.body.get(key)
+            if isinstance(value, str) and value:
+                return value
+        return None
+
     def __str__(self) -> str:
-        return f"{self.message} (HTTP {self.status})"
+        detail = self.detail
+        return f"{self.message} (HTTP {self.status}){f': {detail}' if detail else ''}"
 
 
 class EngieNetworkError(EngieError):
     """Timeouts, connection failures and TLS errors."""
+
+
+class EngieWriteBlocked(EngieError):
+    """A method that changes the account was called on a read-only client.
+
+    Every write is off by default. The endpoints behind them are not test
+    fixtures: POST /api/v1/meterstands files a meter reading with the supplier
+    who bills you, PUT /api/v1/prepayment changes the monthly amount collected
+    by direct debit, and POST /api/v1/contract/move moves the contract to
+    another address. A client that only reads can never fire one by accident.
+
+    Pass ``allow_writes=True`` to :class:`~engie_nl.client.EngieClient` when a
+    write is what you mean.
+    """

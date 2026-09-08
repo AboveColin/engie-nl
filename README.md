@@ -1,10 +1,14 @@
 # engie-nl
 
 Async Python client for the private API behind the **ENGIE Energie NL** app
-(`nl.engie.engieapp`). It reads what the app reads: your customer record and
-EANs, daily consumption per meter, meter readings, the termijnbedrag advice,
-invoices and payments, the smart-meter data mandate, outages, and the day-ahead
-prices of ENGIE's dynamic contract.
+(`nl.engie.engieapp`). It covers the whole thing: all 148 endpoints the app
+declares, with 199 typed models.
+
+The reads a household actually polls are on the client itself: the customer
+record and EANs, daily consumption per meter, meter readings, the termijnbedrag
+advice, invoices, the smart-meter data mandate, outages, and day-ahead prices.
+The rest is grouped by area, `client.tariffs`, `client.assets`, `client.enode`
+and so on, listed below.
 
 ENGIE does not document or support this API. It can change without notice.
 The map it is built from, with the receipts, lives in
@@ -51,11 +55,46 @@ Pass `on_tokens_updated=` to be told when the pair is refreshed, and persist
 `TokenSet.to_dict()`. Home Assistant passes its own `aiohttp` session via
 `session=`.
 
-## What is read-only
+## The whole surface
 
-Everything in this package. The gateway also has endpoints that change your
-contract, meter readings, prepayment and payment details. They are documented
-in the API map and deliberately not implemented here.
+| Group | What it covers |
+|---|---|
+| `client.get_*` | user, consumptions, meterstands, estimations, transactions, documents, mandates, outages, day-ahead prices, MER periods, opening hours |
+| `client.tariffs` | the contract's own rates, `GET /api/v1/tariffs` |
+| `client.meter` | filing and withdrawing meter readings, the P4 feed, dongle activation |
+| `client.billing` | invoice payment status, documents, the MER report, the termijnbedrag, iDEAL |
+| `client.account` | profile, settings cards, areas of interest, passwords, payment details |
+| `client.mandates` | granting and withdrawing the smart-meter mandate |
+| `client.assets` | declared solar panels, heat pumps, batteries, cars, chargers, aircos |
+| `client.enode` | linked vehicles and chargers, locations, charge policies, sessions |
+| `client.smart_charging` | ENGIE's own smart-charging programme |
+| `client.happy_hour` | announced Happy Hours, subscriptions, payouts |
+| `client.solar` | solar potential, quotes, home and energy scans |
+| `client.address` | postcode lookup, iDIN verification, moving the contract |
+| `client.support` | opening hours, waiting time, advice articles, feedback, chat |
+| `client.ev` | charge card and charging station lead forms |
+| `client.legacy` | pre-Okta authentication and account creation |
+| `Net2GridClient` | the P1 dongle, on Net2Grid's own host |
+
+`tools/check_coverage.py` compares the package against the APK map and is run by
+the test suite, so "all 148" stays true rather than being a claim in a README.
+
+## Writes are off unless you ask
+
+Every method that changes the account raises `EngieWriteBlocked` on a normal
+client. The endpoints behind them are not test fixtures: `POST
+/api/v1/meterstands` files a meter reading with the supplier who bills you, `PUT
+/api/v1/prepayment` changes a direct debit, and `POST /api/v1/contract/move`
+moves the contract to another address.
+
+```python
+async with EngieClient(tokens, auth=auth, allow_writes=True) as client:
+    await client.billing.set_prepayment(user.eans, amount=195)
+```
+
+Two POSTs are queries despite the verb, `/api/v1/readings` and
+`/api/v1/p4-errors`, and need no permission: both send a body to read P4 data
+back.
 
 ## Scripts
 

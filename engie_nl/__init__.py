@@ -9,7 +9,9 @@ from .exceptions import (
     EngieError,
     EngieMfaRequiredError,
     EngieNetworkError,
+    EngieWriteBlocked,
 )
+from .net2grid import Net2GridClient, P1Client
 from .models import (
     Consumption,
     ConsumptionSeries,
@@ -32,10 +34,16 @@ from .models import (
     User,
 )
 
-__version__ = "0.1.0"
+# The 180 dataclasses generated from the APK's api-map.json are not re-exported
+# one by one: import them from engie_nl.generated. The 19 below are the curated
+# ones, which carry behaviour the generator cannot infer.
+from . import generated  # noqa: E402  pylint: disable=wrong-import-position
+
+__version__ = "0.2.0"
 
 __all__ = [
     "__version__",
+    "generated",
     "BrowserLogin",
     "EmailChallenge",
     "OktaAuth",
@@ -48,6 +56,9 @@ __all__ = [
     "EngieError",
     "EngieMfaRequiredError",
     "EngieNetworkError",
+    "EngieWriteBlocked",
+    "Net2GridClient",
+    "P1Client",
     "Consumption",
     "ConsumptionSeries",
     "DayAheadPrice",

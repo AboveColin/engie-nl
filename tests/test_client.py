@@ -8,6 +8,7 @@ from datetime import date
 import pytest
 
 from engie_nl import (
+    EngieWriteBlocked,
     EngieApiError,
     EngieAuthError,
     EngieClient,
@@ -276,3 +277,39 @@ async def test_consumption_error_reads_the_live_message_key(server: FakeServer, 
     server.json("/api/v1/consumptions", [{"ean": EAN_E, "data": [], "error": {"message": "not-owned"}}])
     series = await client.get_consumptions(EAN_E, days=1)
     assert series[0].error == "not-owned"
+
+
+async def test_a_write_is_refused_by_default(server: FakeServer, client: EngieClient) -> None:
+    """POST /api/v1/meterstands files a reading with the supplier who bills you."""
+    with pytest.raises(EngieWriteBlocked) as err:
+        await client.meter.add_readings({"eans": [EAN_E]})
+    assert "allow_writes=True" in str(err.value)
+    assert not [r for r in server.requests if r.method != "GET"]
+
+
+async def test_a_write_goes_through_when_allowed(server: FakeServer, tokens: TokenSet) -> None:
+    server.json("/api/v1/meterstands", {"ok": True}, method="POST")
+    async with EngieClient(tokens, base_url=server.url, timeout=5, allow_writes=True) as c:
+        await c.meter.add_readings({"eans": [EAN_E]})
+    assert server.requests[-1].method == "POST"
+
+
+async def test_a_post_that_reads_needs_no_permission(server: FakeServer, client: EngieClient) -> None:
+    """POST /api/v1/p4-errors sends a body to read P4 status back; it changes nothing."""
+    server.json("/api/v1/p4-errors", [{"ean": EAN_E}], method="POST")
+    await client.meter.p4_errors({"eans": [EAN_E]})
+    assert server.requests[-1].path == "/api/v1/p4-errors"
+
+
+async def test_tariffs_sends_both_dates_and_the_ean_array(server: FakeServer, client: EngieClient) -> None:
+    server.json("/api/v1/tariffs", {"tariffs": [{"ean": EAN_E, "price_ex": 0.22787, "tax": 0.04788,
+                                                 "tariff_type": "PEAK", "unit_of_measure": "PER_UNIT"}],
+                                    "types": [{"ean": EAN_E, "is_single": False}]})
+    result = await client.tariffs.get(EAN_E, start=date(2026, 9, 9), end=date(2026, 10, 31))
+    q = query_of(server.requests[-1])
+    assert q["date_from"] == ["2026-09-09"] and q["date_to"] == ["2026-10-31"]
+    assert q["eans[]"] == [EAN_E]
+    assert result is not None
+    assert result.tariffs[0].price_ex == pytest.approx(0.22787)
+    assert result.tariffs[0].tariff_type == "PEAK"
+    assert result.types[0].is_single is False

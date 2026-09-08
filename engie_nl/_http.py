@@ -6,9 +6,12 @@ closed with the owner. Both classes need that same rule, so it lives once.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import aiohttp
+
+from .exceptions import EngieNetworkError
 
 
 class SessionOwner:
@@ -46,3 +49,36 @@ async def json_or_text(resp: aiohttp.ClientResponse) -> Any:
         return await resp.json(content_type=None)
     except (aiohttp.ContentTypeError, ValueError):
         return text
+
+
+async def send(
+    session: aiohttp.ClientSession,
+    verb: str,
+    url: str,
+    *,
+    params: list[tuple[str, str]] | None = None,
+    form: list[tuple[str, str]] | None = None,
+    json_body: Any = None,
+    headers: dict[str, str] | None = None,
+    timeout: aiohttp.ClientTimeout | None = None,
+) -> tuple[int, Any]:
+    """One request, returning ``(status, body)``.
+
+    Both the gateway client and the Net2Grid client need exactly this, down to
+    turning every transport failure into :class:`EngieNetworkError` so callers
+    can retry on one type. The status is returned rather than raised on, because
+    what a 4xx means differs per host.
+    """
+    try:
+        async with session.request(
+            verb,
+            url,
+            params=params,
+            data=form,
+            json=json_body,
+            headers=headers,
+            timeout=timeout,
+        ) as resp:
+            return resp.status, await json_or_text(resp)
+    except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+        raise EngieNetworkError(f"{verb} {url} failed: {err or type(err).__name__}") from err
