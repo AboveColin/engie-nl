@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "engie-nl"
-version = "0.1.0"
+version = "0.2.0"
 description = "Async Python client for the private API behind the ENGIE Energie NL app"
 readme = "README.md"
 license = { text = "MIT" }
