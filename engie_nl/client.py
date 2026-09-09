@@ -79,7 +79,13 @@ from .constants import (
     PATH_TRANSACTIONS,
     PATH_USER,
 )
-from .exceptions import EngieApiError, EngieAuthError, EngieNetworkError, EngieWriteBlocked
+from .exceptions import (
+    EngieApiError,
+    EngieAuthError,
+    EngieNetworkError,
+    EngieRateLimited,
+    EngieWriteBlocked,
+)
 from .models import (
     ConsumptionSeries,
     DayAheadPrice,
@@ -229,6 +235,10 @@ class EngieClient(SessionOwner):
                 return await self._request_once(
                     verb, path, params=params, form=form, json_body=json_body, headers=headers
                 )
+            except EngieRateLimited:
+                # Answering "slow down" with three quick retries is how a short
+                # block becomes a long one. The next poll is the retry.
+                raise
             except EngieNetworkError:
                 if attempt >= REQUEST_ATTEMPTS:
                     raise
@@ -264,6 +274,8 @@ class EngieClient(SessionOwner):
             )
         if status == 401:
             raise EngieAuthError("the gateway rejected the access token")
+        if status == 429:
+            raise EngieRateLimited(f"{verb} {path}: the gateway asked for fewer requests")
         if status >= 400:
             raise EngieApiError(f"{verb} {path} failed", status=status, body=body)
         return body

@@ -100,6 +100,30 @@ class EngieNetworkError(EngieError):
     """Timeouts, connection failures and TLS errors."""
 
 
+class EngieRateLimited(EngieNetworkError):
+    """The service asked for fewer requests, HTTP 429.
+
+    A subclass of :class:`EngieNetworkError` because it is transient and the
+    caller should come back later, and deliberately **not** of
+    :class:`EngieAuthError`: the credentials are fine.
+
+    That distinction is the whole point of the type. Measured 2026-09-09: Okta
+    answered one 429 to a refresh, three seconds after the access token
+    expired. The library called it an authentication failure, Home Assistant
+    turned that into ``ConfigEntryAuthFailed``, and the coordinator stopped and
+    waited for a human. 35 entities stayed unavailable for 21 hours over a
+    request that would have worked on the next try.
+
+    It is also excluded from the client's own retry loop. Answering a rate
+    limit with three quick retries is how a short block becomes a long one; one
+    attempt per poll is enough, and the next poll is the retry.
+    """
+
+    def __init__(self, message: str, retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 class EngieWriteBlocked(EngieError):
     """A method that changes the account was called on a read-only client.
 

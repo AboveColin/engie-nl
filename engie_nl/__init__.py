@@ -9,6 +9,7 @@ from .exceptions import (
     EngieError,
     EngieMfaRequiredError,
     EngieNetworkError,
+    EngieRateLimited,
     EngieWriteBlocked,
 )
 from .net2grid import Net2GridClient, P1Client
@@ -39,7 +40,7 @@ from .models import (
 # ones, which carry behaviour the generator cannot infer.
 from . import generated  # noqa: E402  pylint: disable=wrong-import-position
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 __all__ = [
     "__version__",
@@ -56,6 +57,7 @@ __all__ = [
     "EngieError",
     "EngieMfaRequiredError",
     "EngieNetworkError",
+    "EngieRateLimited",
     "EngieWriteBlocked",
     "Net2GridClient",
     "P1Client",

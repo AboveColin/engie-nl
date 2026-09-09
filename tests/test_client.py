@@ -8,6 +8,7 @@ from datetime import date
 import pytest
 
 from engie_nl import (
+    EngieRateLimited,
     EngieWriteBlocked,
     EngieApiError,
     EngieAuthError,
@@ -313,3 +314,39 @@ async def test_tariffs_sends_both_dates_and_the_ean_array(server: FakeServer, cl
     assert result.tariffs[0].price_ex == pytest.approx(0.22787)
     assert result.tariffs[0].tariff_type == "PEAK"
     assert result.types[0].is_single is False
+
+
+async def test_a_429_is_not_an_auth_failure(server: FakeServer, tokens: TokenSet) -> None:
+    """A rate limit must not reach a caller as "your credentials are wrong".
+
+    Home Assistant turns EngieAuthError into ConfigEntryAuthFailed, which stops
+    the coordinator until a human logs in again. On 2026-09-09 one 429 from
+    Okta did exactly that for 21 hours.
+    """
+    calls = {"n": 0}
+
+    def limited(_request: web.Request) -> web.Response:
+        calls["n"] += 1
+        return web.json_response({}, status=429, headers={"Retry-After": "60"})
+
+    server.handle("GET", "/api/v1/user", limited)
+    async with EngieClient(tokens, base_url=server.url, timeout=5, retry_backoff=0) as client:
+        with pytest.raises(EngieRateLimited) as err:
+            await client.get_user()
+    assert not isinstance(err.value, EngieAuthError)
+    assert isinstance(err.value, EngieNetworkError)
+    # One attempt, not three: retrying a rate limit extends it.
+    assert calls["n"] == 1
+
+
+async def test_okta_429_on_refresh_is_a_rate_limit(okta_ok: FakeServer, tokens: TokenSet) -> None:
+    from engie_nl import OktaAuth  # pylint: disable=import-outside-toplevel
+
+    okta_ok.json("/oauth2/default/v1/token", {}, status=429, method="POST")
+    auth = OktaAuth(client_id="0oatest", issuer=f"{okta_ok.url}/oauth2/default",
+                    org_url=okta_ok.url, timeout=5)
+    stale = TokenSet(access_token="stale", refresh_token="okta-refresh-1", expires_at=1.0)
+    with pytest.raises(EngieRateLimited) as err:
+        await auth.refresh(stale)
+    await auth.close()
+    assert err.value.retry_after == 60.0 or err.value.retry_after is None

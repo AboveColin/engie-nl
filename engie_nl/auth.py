@@ -65,6 +65,7 @@ from .exceptions import (
     EngieEmailCodeRequired,
     EngieMfaRequiredError,
     EngieNetworkError,
+    EngieRateLimited,
 )
 
 
@@ -456,7 +457,17 @@ class OktaAuth(SessionOwner):
                 if resp.status >= 400:
                     err = data.get("error") if isinstance(data, dict) else None
                     desc = data.get("error_description") if isinstance(data, dict) else None
-                    raise EngieAuthError(f"Okta token endpoint answered {resp.status}: {err or ''} {desc or ''}".strip())
+                    detail = f"Okta token endpoint answered {resp.status}: {err or ''} {desc or ''}".strip()
+                    # 429 and 5xx are Okta declining to answer now, not Okta
+                    # rejecting the credentials. Raising EngieAuthError for
+                    # either one asks the user to log in again over something
+                    # that fixes itself. See EngieRateLimited for what that
+                    # cost on 2026-09-09.
+                    if resp.status == 429:
+                        raise EngieRateLimited(detail, _retry_after(resp))
+                    if resp.status >= 500:
+                        raise EngieNetworkError(detail)
+                    raise EngieAuthError(detail)
         except (aiohttp.ClientError, asyncio.TimeoutError) as err:
             raise EngieNetworkError(f"Okta token request failed: {err}") from err
         if not isinstance(data, dict):
@@ -564,3 +575,14 @@ def _interaction_code(idx: dict[str, Any]) -> str:
         "Okta accepted the password but did not finish the login; it now asks for "
         f"{offered or 'nothing this client understands'}"
     )
+
+
+def _retry_after(resp: aiohttp.ClientResponse) -> float | None:
+    """Seconds from a ``Retry-After`` header, when the service sent one."""
+    raw = resp.headers.get("Retry-After")
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
