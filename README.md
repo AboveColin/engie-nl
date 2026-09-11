@@ -110,8 +110,16 @@ back.
 ```sh
 uv venv .venv && uv pip install -e '.[dev]'
 .venv/bin/pytest
+.venv/bin/pytest --cov          # line and branch coverage, gated at 100%
 .venv/bin/pylint engie_nl
+.venv/bin/mypy engie_nl
 ```
 
 Tests run the client against a loopback aiohttp server that plays both Okta
 and the gateway; no network, no mocks of aiohttp internals.
+
+`--cov` needs no other flags: the source list, branch coverage and the 100%
+gate are in `pyproject.toml`, so the number is the same wherever it is run.
+Every value in the tests is invented. Nothing in `tests/` came from a real
+account; `scripts/probe.py` writes real responses to the gitignored
+`tests/fixtures/_live/` and no test reads them.

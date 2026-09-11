@@ -617,7 +617,7 @@ async def test_mandate_grant_and_withdraw_carry_every_ean(
     assert server.multi_forms[-1] == {"eans[]": [EAN_E, EAN_G], "currentVersion": ["2"]}
     assert [type(g) for g in granted] == [ApprovalData]
 
-    assert await writer.mandates.withdraw(EAN_E) is None
+    await writer.mandates.withdraw(EAN_E)
     assert server.multi_forms[-1] == {"eans[]": [EAN_E]}
 
 

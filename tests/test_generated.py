@@ -22,7 +22,7 @@ from engie_nl import generated
 from engie_nl.generated import _obj
 
 
-def _model_classes() -> list[type]:
+def _model_classes() -> list[Any]:
     """Every dataclass ``generated.py`` defines, excluding the ones it imports.
 
     ``Consumption``, ``Register``, ``Tariffs`` and ``Transaction`` are in the
@@ -41,14 +41,14 @@ def _model_classes() -> list[type]:
     return sorted(found, key=lambda c: c.__name__)
 
 
-MODELS = _model_classes()
+MODELS: list[Any] = _model_classes()
 
 
 def test_an_empty_body_parses_into_defaults() -> None:
     """The gateway answers ``{}`` for a record it has nothing for."""
     wrong: list[str] = []
     for model in MODELS:
-        parsed = model.from_api({})  # type: ignore[attr-defined]
+        parsed = model.from_api({})
         assert isinstance(parsed, model)
         assert parsed.raw == {}, model.__name__
         for field in dataclasses.fields(parsed):
@@ -62,7 +62,7 @@ def test_raw_keeps_a_key_the_map_did_not_know() -> None:
     """A field ENGIE adds after the APK was read must survive on ``raw``."""
     body: dict[str, Any] = {"a_key_no_model_declares": [1, 2, 3]}
     for model in MODELS:
-        assert model.from_api(body).raw == body, model.__name__  # type: ignore[attr-defined]
+        assert model.from_api(body).raw == body, model.__name__
 
 
 def test_every_field_survives_a_value_of_the_wrong_type() -> None:
@@ -74,7 +74,7 @@ def test_every_field_survives_a_value_of_the_wrong_type() -> None:
     """
     for model in MODELS:
         body = {field.name: object() for field in dataclasses.fields(model) if field.name != "raw"}
-        assert model.from_api(body).raw == body, model.__name__  # type: ignore[attr-defined]
+        assert model.from_api(body).raw == body, model.__name__
 
 
 def test_obj_takes_a_nested_object_and_refuses_anything_else() -> None:

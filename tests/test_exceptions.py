@@ -71,4 +71,4 @@ def test_every_error_is_an_engie_error_and_keeps_its_message() -> None:
                 EngieWriteBlocked("d"), EngieRateLimited("e"),
                 EngieMfaRequiredError("f", status="MFA_REQUIRED")):
         assert isinstance(err, EngieError)
-        assert err.message == str(err).split(" (HTTP ")[0]
+        assert err.message == str(err).split(" (HTTP ", maxsplit=1)[0]
