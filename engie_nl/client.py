@@ -259,7 +259,12 @@ class EngieClient(SessionOwner):
         status, body = await send(
             session,
             verb,
-            f"{self._base_url}{path}",
+            # The separator is added here rather than assumed on either side:
+            # base_url is rstripped of its slash, and the two Seamly chat paths
+            # are written relative because they hang off a different base_url.
+            # Concatenating those two gave "http://host:8080classifications/...",
+            # which yarl rejects outright.
+            f"{self._base_url}/{path.lstrip('/')}",
             params=params,
             form=form,
             json_body=json_body,
