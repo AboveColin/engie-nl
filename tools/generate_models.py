@@ -6,9 +6,10 @@ Retrofit interface and every model reachable from one. This script turns the
 model half into dataclasses so the client can return typed objects for all 148
 endpoints instead of dicts for the 137 the curated models do not cover.
 
-Run it after re-extracting a new APK:
+Run it after re-extracting a new APK, passing the map or setting
+ENGIE_NL_API_MAP:
 
-    python3 tools/generate_models.py ../../apk-reverse-engineering/docs/engie-nl/api-map.json
+    python3 tools/generate_models.py path/to/api-map.json
 
 The 19 models in models.py are hand-written and take precedence: they carry
 behaviour the generator cannot infer, such as ConsumptionSeries.total or the
@@ -19,6 +20,7 @@ from __future__ import annotations
 
 import json
 import keyword
+import os
 import re
 import sys
 from collections import Counter
@@ -27,9 +29,13 @@ from typing import Any
 
 REPO = Path(__file__).resolve().parent.parent
 OUT = REPO / "engie_nl" / "generated.py"
-DEFAULT_MAP = (
-    REPO.parents[2]
-    / "apk-reverse-engineering/docs/engie-nl/api-map.json"
+
+# The map is extracted by a separate repo that is not published with this one.
+# Point ENGIE_NL_API_MAP at its api-map.json; the fallback is a checkout sitting
+# beside this one.
+DEFAULT_MAP = Path(
+    os.environ.get("ENGIE_NL_API_MAP")
+    or REPO.parent / "apk-reverse-engineering/docs/engie-nl/api-map.json"
 )
 
 # Hand-written in models.py. The generator skips these names entirely.

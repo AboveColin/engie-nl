@@ -14,15 +14,20 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
 import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 PACKAGE = REPO / "engie_nl"
-DEFAULT_MAP = (
-    REPO.parents[2]
-    / "apk-reverse-engineering/docs/engie-nl/api-map.json"
+
+# The map is extracted by a separate repo that is not published with this one.
+# Point ENGIE_NL_API_MAP at its api-map.json; the fallback is a checkout sitting
+# beside this one. The tests skip themselves when neither resolves.
+DEFAULT_MAP = Path(
+    os.environ.get("ENGIE_NL_API_MAP")
+    or REPO.parent / "apk-reverse-engineering/docs/engie-nl/api-map.json"
 )
 
 # Endpoints the package deliberately does not call, with the reason. Empty
