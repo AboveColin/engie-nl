@@ -48,6 +48,9 @@ class FakeServer:
         self.app = web.Application()
         self.requests: list[web.Request] = []
         self.forms: list[dict[str, str]] = []
+        # The same forms with the repeats kept, because ``eans[]`` is one key
+        # per value and a flat dict would show only the last one.
+        self.multi_forms: list[dict[str, list[str]]] = []
         self.jsons: list[Any] = []
         self._routes: dict[tuple[str, str], Handler] = {}
         self.app.router.add_route("*", "/{tail:.*}", self._dispatch)
@@ -80,7 +83,11 @@ class FakeServer:
             if "json" in (request.content_type or ""):
                 self.jsons.append(await request.json())
             else:
-                self.forms.append({k: v for k, v in (await request.post()).items() if isinstance(v, str)})
+                posted = await request.post()
+                self.forms.append({k: v for k, v in posted.items() if isinstance(v, str)})
+                self.multi_forms.append(
+                    {k: [v for v in posted.getall(k) if isinstance(v, str)] for k in posted}
+                )
         handler = self._routes.get((request.method, request.path))
         if handler is None:
             return web.json_response({"error": "no route", "path": request.path}, status=404)
@@ -300,5 +307,14 @@ async def client(server: FakeServer, auth: OktaAuth, tokens: TokenSet) -> AsyncI
         yield c
 
 
+@pytest_asyncio.fixture
+async def writer(server: FakeServer, auth: OktaAuth, tokens: TokenSet) -> AsyncIterator[EngieClient]:
+    """The same client with the write gate open, for the endpoints that change the account."""
+    async with EngieClient(tokens, auth=auth, base_url=server.url, timeout=5, allow_writes=True) as c:
+        yield c
+
+
 def query_of(request: web.Request) -> dict[str, list[str]]:
     return parse_qs(request.query_string, keep_blank_values=True)
+
+
