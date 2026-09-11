@@ -378,6 +378,49 @@ WRITES = [
 ]
 
 
+# The writes whose arguments build a query string or a form. Their shape is
+# tested by hand further down; these rows exist so the gate is checked on them
+# too. Without them, swapping a _write for a _query in one of these methods
+# takes the gate off and every test still passes.
+GATED = [
+    Call("account", "set_payment_info", "PUT", "/api/v1/payment-info", None,
+         kwargs={"bank_account": "NL00BANK0000000000", "payment_method": "incasso"}),
+    Call("billing", "set_prepayment", "PUT", "/api/v1/prepayment", None,
+         args=([EAN_E],), kwargs={"amount": 180}),
+    Call("legacy", "password_grant", "POST", "/api/v1/auth/customer", None,
+         kwargs={"username": "test@example.com", "password": "not-a-password"}),
+    Call("legacy", "refresh_grant", "POST", "/api/v1/auth/customer/refresh", None,
+         args=("gateway-refresh-0",)),
+    Call("legacy", "check_account", "POST", "/api/v3/check-account", None,
+         kwargs={"customer_nr": "00000000"}),
+    Call("legacy", "initial_login", "POST", "/api/v1/initial-login", None,
+         kwargs={"customer_nr": "00000000", "zip_code": "0000AA", "house_nr": "1",
+                 "iban_last_three": "000"}),
+    Call("mandates", "grant", "POST", "/api/v1/mandates", None,
+         args=(EAN_E,), kwargs={"current_version": "2"}),
+    Call("mandates", "withdraw", "POST", "/api/v1/withdraw-mandates", None, args=(EAN_E,)),
+    Call("meter", "delete_readings", "DELETE", "/api/v1/meterstands", None,
+         args=([EAN_E],), kwargs={"day": date(2026, 9, 8)}),
+    Call("meter", "activate_dongle", "POST", "/api/v1/p1/activate", None, args=("dongle-0",)),
+    Call("smart_charging", "delete_mandate", "DELETE", "/api/v1/smart-charging/mandate", None,
+         kwargs={"contact_id": "con-0", "email_address": "test@example.com",
+                 "delivery_agreement_id": "da-0"}),
+    Call("smart_charging", "delete_user", "DELETE", "/api/v1/smart-charging/user", None,
+         kwargs={"contact_id": "con-0", "email_address": "test@example.com"}),
+    Call("smart_charging", "create_vehicle", "POST", "/api/v1/smart-charging/vehicle", None,
+         args=("car-0",)),
+    Call("solar", "request_quote", "POST", "/api/v1/solar-quote", None,
+         kwargs={"first_name": "Jane", "last_name": "Doe", "email": "test@example.com",
+                 "phone": "0000000000", "zip_code": "0000AA", "street": "Teststraat",
+                 "city": "Teststad", "house_nr": "1"}),
+    Call("solar", "request_home_scan", "POST", "/api/v1/woning-scan", None, args=({},)),
+    Call("solar", "request_energy_scan", "POST", "/api/v1/energie-scan", None, args=({},)),
+    Call("support", "send_feedback", "POST", "/api/v1/feedback", None, args=({},)),
+    Call("account", "forgot_username", "POST", "/api/v2/customers/me/forgot-username", None,
+         args=(BODY,), kwargs={"api_version": "v2"}),
+]
+
+
 def _answer(server: FakeServer, call: Call) -> None:
     server.json(call.route, call.reply, method=call.verb)
 
@@ -400,12 +443,11 @@ async def test_a_write_reaches_its_path_when_it_is_allowed(
     assert (server.requests[-1].method, server.requests[-1].path) == (call.verb, call.route)
 
 
-@pytest.mark.parametrize("call", WRITES, ids=[c.id for c in WRITES])
+@pytest.mark.parametrize("call", WRITES + GATED, ids=[c.id for c in WRITES + GATED])
 async def test_a_write_is_refused_without_allow_writes(
     server: FakeServer, client: EngieClient, call: Call
 ) -> None:
     """The gate is in one place so a new endpoint cannot forget it; prove it per endpoint."""
-    _answer(server, call)
     with pytest.raises(EngieWriteBlocked) as err:
         await call.invoke(client)
     assert f"{call.verb} {call.path}" in str(err.value)
