@@ -350,3 +350,79 @@ async def test_okta_429_on_refresh_is_a_rate_limit(okta_ok: FakeServer, tokens: 
         await auth.refresh(stale)
     await auth.close()
     assert err.value.retry_after == 60.0 or err.value.retry_after is None
+
+
+async def test_a_window_that_runs_backwards_is_refused(client: EngieClient) -> None:
+    """An end before the start asks the gateway for nothing, so fail before asking."""
+    with pytest.raises(ValueError, match="start must not be after end"):
+        await client.get_consumptions(EAN_E, start=date(2026, 9, 8), end=date(2026, 9, 1))
+
+
+async def test_a_client_without_auth_cannot_refresh(server: FakeServer) -> None:
+    """An expired token and nothing to refresh it with is a login, not a retry."""
+    stale = TokenSet(access_token="stale", refresh_token="okta-refresh-1", expires_at=1.0)
+    async with EngieClient(stale, base_url=server.url, timeout=5) as c:
+        with pytest.raises(EngieAuthError, match="no OktaAuth was given"):
+            await c.refresh_tokens()
+    assert server.requests == []
+
+
+async def test_an_async_tokens_callback_is_awaited(okta_ok: FakeServer, client: EngieClient) -> None:
+    """Home Assistant persists the pair with an async store; a coroutine must not be dropped."""
+    saved: list[str] = []
+
+    async def store(new: TokenSet) -> None:
+        saved.append(new.access_token)
+
+    client._on_tokens_updated = store  # pylint: disable=protected-access
+    okta_ok.sequence("/api/v1/user", (401, {"message": "Unauthenticated."}), (200, {"customer_id": "K1"}))
+    await client.get_user()
+    assert saved == ["okta-access-2"]
+
+
+async def test_user_and_estimations_refuse_a_body_that_is_not_an_object(
+    server: FakeServer, client: EngieClient
+) -> None:
+    """Both return a single record; a list means the gateway answered something else."""
+    server.json("/api/v1/user", [])
+    server.json("/api/v1/estimations", [])
+    with pytest.raises(EngieApiError, match="unexpected /user body"):
+        await client.get_user()
+    with pytest.raises(EngieApiError, match="unexpected /estimations body"):
+        await client.get_estimations(EAN_E, amount=180)
+
+
+async def test_transactions_and_documents_accept_both_envelopes(
+    server: FakeServer, client: EngieClient
+) -> None:
+    """Both endpoints have been seen bare and wrapped in a named key."""
+    server.json("/api/v1/transactions", [{"id": "t1", "amount": -180.0, "status": "PAID"}])
+    assert [t.id for t in await client.get_transactions()] == ["t1"]
+
+    server.json("/api/v1/documents", {"documents": [{"reference": "DOC-0", "title": "Termijnnota"}]})
+    wrapped = await client.get_documents()
+    assert [d.reference for d in wrapped] == ["DOC-0"]
+
+    server.json("/api/v1/documents", [{"reference": "DOC-1", "title": "Jaarnota"}])
+    assert [d.reference for d in await client.get_documents()] == ["DOC-1"]
+
+
+async def test_mer_periods_and_opening_hours(server: FakeServer, client: EngieClient) -> None:
+    server.json("/api/v1/mer/periods", [{"id": "2026-08", "startDate": "2026-08-01"}])
+    periods = await client.get_mer_periods()
+    assert periods[0].id == "2026-08" and periods[0].start_date == date(2026, 8, 1)
+
+    # No model yet, so the body comes back as the gateway sent it.
+    server.json("/api/v1/opening-hours", {"days": [{"day": "monday", "open": "08:00"}]})
+    assert await client.get_opening_hours() == {"days": [{"day": "monday", "open": "08:00"}]}
+
+
+async def test_day_ahead_prices_default_to_today_and_tomorrow(
+    server: FakeServer, client: EngieClient
+) -> None:
+    server.json("/api/v1/tariffs/day-ahead", [])
+    await client.get_day_ahead_prices("G")
+    q = query_of(server.requests[-1])
+    assert q["type"] == ["G"]
+    assert (date.fromisoformat(q["end_date"][0]) - date.fromisoformat(q["start_date"][0])).days == 1
+    assert date.fromisoformat(q["start_date"][0]) == date.today()

@@ -6,6 +6,8 @@ from datetime import date, datetime
 
 from engie_nl.models import (
     Consumption,
+    ConsumptionSeries,
+    DeliveryAddress,
     Mandate,
     MerPeriod,
     MeteringPoint,
@@ -70,3 +72,29 @@ def test_engie_writes_an_unset_date_as_year_one() -> None:
     assert point.data_from is None
     assert point.data_to is None
     assert point.start_date == date(2026, 9, 9)
+
+
+def test_date_needs_a_full_ten_characters() -> None:
+    """The gateway sends "2026-09" for a MER period id; that is not a date."""
+    assert _date("2026-09") is None
+    assert _date("") is None
+
+
+def test_delivery_address_lists_its_own_eans() -> None:
+    """A customer with two addresses polls each one's EANs separately."""
+    address = DeliveryAddress.from_api(
+        {"id": "adr-0", "street": "Teststraat", "metering_points": [
+            {"ean": "871694840000000001", "type": "ELK"},
+            {"ean": "", "type": "GAS"},
+            {"type": "GAS"},
+        ]}
+    )
+    assert address.eans == ["871694840000000001"]
+
+
+def test_a_consumption_error_that_is_not_an_object_is_kept_as_text() -> None:
+    """The error key has been seen as an object and as a bare string."""
+    assert ConsumptionSeries.from_api({"ean": "1", "error": "not-owned"}).error == "not-owned"
+    assert ConsumptionSeries.from_api({"ean": "1", "error": None}).error is None
+    assert ConsumptionSeries.from_api({"ean": "1", "error": {"detail": "no data"}}).error == "no data"
+    assert ConsumptionSeries.from_api({"ean": "1", "error": {"details": "no data"}}).error == "no data"
