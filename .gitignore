@@ -6,6 +6,8 @@ dist/
 .venv/
 .pytest_cache/
 .mypy_cache/
+.coverage
+htmlcov/
 .DS_Store
 
 # Live-test artefacts. Tokens never enter the repo; fixtures are added by hand
