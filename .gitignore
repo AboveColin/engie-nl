@@ -10,7 +10,8 @@ dist/
 htmlcov/
 .DS_Store
 
-# Live-test artefacts. Tokens never enter the repo; fixtures are added by hand
-# after redaction (scripts/probe.py writes to tests/fixtures/_live/, ignored).
+# Live-test artefacts. Tokens and captured responses are written outside the
+# working tree (~/.config/engie-nl/), so nothing here depends on these rules;
+# they stay as a second line of defence against an older probe.py.
 tests/fixtures/_live/
 *.tokens.json

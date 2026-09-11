@@ -3,8 +3,13 @@
 
 Calls /user, /consumptions (7 days), /meterstands (30 days), /estimations,
 /transactions, /mandates, /tariffs/day-ahead and /mer/periods. Writes each
-raw response to ``tests/fixtures/_live/<name>.json`` (gitignored) and prints a
-one-line summary per endpoint. Nothing here writes to ENGIE.
+raw response to ``$ENGIE_CAPTURES/<name>.json`` and prints a one-line summary
+per endpoint. Nothing here writes to ENGIE.
+
+The captures land outside the repo, next to the token pair, because a real
+/user answer carries the account holder's name, address, bank account and both
+meter EANs. A gitignore rule would be one `git add -f` away from publishing
+them; a path outside the working tree cannot be committed by accident.
 
 Redact before promoting a fixture into ``tests/fixtures/``: EANs, customer id,
 names, address, email, bank account, document references.
@@ -14,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 from datetime import date, timedelta
 from pathlib import Path
@@ -24,12 +30,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from engie_nl import EngieApiError, EngieClient, EnergyType, OktaAuth, TokenSet  # noqa: E402
 from scripts.login import TOKEN_FILE, save  # noqa: E402
 
-OUT = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "_live"
+OUT = Path(os.environ.get("ENGIE_CAPTURES", Path.home() / ".config" / "engie-nl" / "captures"))
 
 
 def dump(name: str, payload: Any) -> None:
     OUT.mkdir(parents=True, exist_ok=True)
-    (OUT / f"{name}.json").write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    path = OUT / f"{name}.json"
+    path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    path.chmod(0o600)
 
 
 async def main() -> int:

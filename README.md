@@ -103,7 +103,10 @@ back.
   `~/.config/engie-nl/tokens.json` (mode 0600). `--check` runs the whole login
   and saves nothing; `--browser` uses the browser flow instead.
 - `scripts/probe.py`: reads every supported endpoint once and writes the raw
-  responses to `tests/fixtures/_live/` (gitignored) for inspection.
+  responses to `~/.config/engie-nl/captures/` (mode 0600, override with
+  `ENGIE_CAPTURES`) for inspection. They land outside the repo because a real
+  `/user` answer carries the account holder's name, address, bank account and
+  both meter EANs.
 
 ## Development
 
@@ -118,8 +121,20 @@ uv venv .venv && uv pip install -e '.[dev]'
 Tests run the client against a loopback aiohttp server that plays both Okta
 and the gateway; no network, no mocks of aiohttp internals.
 
+`tests/test_coverage.py` checks the package against the APK's `api-map.json`,
+which lives in a separate repo that is not published with this one. Point
+`ENGIE_NL_API_MAP` at that file, or check the repo out beside this one, and the
+two endpoint tests run. Without it they skip and name the path they looked for,
+so a skip is visible rather than a silent pass:
+
+```sh
+export ENGIE_NL_API_MAP=/path/to/apk-reverse-engineering/docs/engie-nl/api-map.json
+```
+
 `--cov` needs no other flags: the source list, branch coverage and the 100%
 gate are in `pyproject.toml`, so the number is the same wherever it is run.
 Every value in the tests is invented. Nothing in `tests/` came from a real
-account; `scripts/probe.py` writes real responses to the gitignored
-`tests/fixtures/_live/` and no test reads them.
+account; `scripts/probe.py` writes real responses to
+`~/.config/engie-nl/captures/`, outside the working tree, and no test reads
+them. Keeping them out of the repo means no gitignore rule stands between a
+real bank account number and a public push.
