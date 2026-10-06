@@ -138,3 +138,10 @@ account; `scripts/probe.py` writes real responses to
 `~/.config/engie-nl/captures/`, outside the working tree, and no test reads
 them. Keeping them out of the repo means no gitignore rule stands between a
 real bank account number and a public push.
+
+## Supporting the project
+
+This project is free and stays free. If it is useful to you, you can support its
+development through [GitHub Sponsors](https://github.com/sponsors/AboveColin).
+Sponsorship is voluntary and unlocks nothing: every feature, fix and security
+update ships in the public release.
