@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
 import time
 
 import pytest
@@ -33,6 +34,7 @@ from tests.conftest import (
     EMAIL_AUTHENTICATOR_ID,
     EMAIL_CODE,
     INTERACTION_CODE,
+    INTERACTION_HANDLE,
     PASSWORD,
     PASSWORD_AUTHENTICATOR_ID,
     REDIRECT,
@@ -193,6 +195,58 @@ async def test_login_stops_on_the_email_code_after_sending_it(okta_mfa: FakeServ
     assert exchange["grant_type"] == "interaction_code"
     # The verifier must be the one from the first half, carried on the challenge.
     assert _challenge_of(exchange["code_verifier"]) == okta_mfa.forms[0]["code_challenge"]
+
+
+async def test_debug_log_names_every_step_and_holds_no_secret(
+    okta_mfa: FakeServer, auth: OktaAuth, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A login log gets pasted into issues, so it carries names and statuses only."""
+    with caplog.at_level(logging.DEBUG, logger="engie_nl.auth"):
+        with pytest.raises(EngieEmailCodeRequired) as err:
+            await auth.login(USERNAME, PASSWORD)
+        await auth.submit_email_code(err.value.challenge, EMAIL_CODE)
+
+    log = caplog.text
+    assert "Okta interact: HTTP 200" in log
+    assert "Okta IDX step introspect: HTTP 200, remediations ['identify']" in log
+    assert "Okta IDX step identify: HTTP 200, remediations ['challenge-authenticator', 'select-authenticator-authenticate']" in log
+    assert "authenticators ['email', 'password']" in log
+    assert "Okta IDX step email code: HTTP 200, remediations none, authenticators none, interaction code issued" in log
+    assert "Okta token request (interaction_code): HTTP 200" in log
+
+    verifier = okta_mfa.forms[-1]["code_verifier"]
+    secrets_in_play = [
+        USERNAME,
+        PASSWORD,
+        EMAIL_CODE,
+        STATE_HANDLE,
+        INTERACTION_CODE,
+        INTERACTION_HANDLE,
+        EMAIL_AUTHENTICATOR_ID,
+        PASSWORD_AUTHENTICATOR_ID,
+        verifier,
+        ACCESS,
+        REFRESH,
+        "id.token.x",
+    ]
+    leaked = [secret for secret in secrets_in_play if secret in log]
+    assert leaked == []
+
+
+async def test_debug_log_records_a_refused_step_without_oktas_message(
+    okta_ok: FakeServer, auth: OktaAuth, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.DEBUG, logger="engie_nl.auth"):
+        with pytest.raises(EngieAuthError):
+            await auth.login(USERNAME, "wrong-password")
+        with pytest.raises(EngieAuthError):
+            await auth.exchange_code("stale-code", "stale-verifier")
+
+    assert "Okta IDX step challenge-authenticator: HTTP 401" in caplog.text
+    assert "error message yes" in caplog.text
+    assert "Okta token request (authorization_code): HTTP 400" in caplog.text
+    for secret in ("wrong-password", "Authenticatie mislukt", "stale-code", "stale-verifier"):
+        assert secret not in caplog.text
 
 
 async def test_wrong_email_code_reports_oktas_words(okta_mfa: FakeServer, auth: OktaAuth) -> None:
