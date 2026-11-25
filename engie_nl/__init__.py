@@ -40,7 +40,7 @@ from .models import (
 # ones, which carry behaviour the generator cannot infer.
 from . import generated  # noqa: E402  pylint: disable=wrong-import-position
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 
 __all__ = [
     "__version__",
