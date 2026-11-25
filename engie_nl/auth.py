@@ -41,6 +41,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 import secrets
 import time
 from dataclasses import dataclass
@@ -67,6 +68,8 @@ from .exceptions import (
     EngieNetworkError,
     EngieRateLimited,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _b64url(raw: bytes) -> str:
@@ -291,6 +294,7 @@ class OktaAuth(SessionOwner):
                 status = resp.status
         except (aiohttp.ClientError, asyncio.TimeoutError) as err:
             raise EngieNetworkError(f"Okta interact request failed: {err}") from err
+        _LOGGER.debug("Okta interact: HTTP %s", status)
         if status >= 400 or not isinstance(data, dict) or not data.get("interaction_handle"):
             raise EngieAuthError(f"Okta refused to start a login (HTTP {status}): {str(data)[:200]}")
         return str(data["interaction_handle"])
@@ -314,6 +318,7 @@ class OktaAuth(SessionOwner):
                 status = resp.status
         except (aiohttp.ClientError, asyncio.TimeoutError) as err:
             raise EngieNetworkError(f"Okta IDX request failed: {err}") from err
+        _LOGGER.debug("Okta IDX step %s: HTTP %s, %s", step, status, _offer_summary(data))
         if not isinstance(data, dict):
             raise EngieAuthError(f"Okta IDX returned a non-JSON body (HTTP {status}): {str(data)[:200]}")
         errors = _idx_messages(data)
@@ -454,6 +459,7 @@ class OktaAuth(SessionOwner):
                 timeout=self._timeout,
             ) as resp:
                 data = await json_or_text(resp)
+                _LOGGER.debug("Okta token request (%s): HTTP %s", form.get("grant_type"), resp.status)
                 if resp.status >= 400:
                     err = data.get("error") if isinstance(data, dict) else None
                     desc = data.get("error_description") if isinstance(data, dict) else None
@@ -523,6 +529,37 @@ def _authenticator_options(idx: dict[str, Any]) -> list[str]:
     return [str(option.get("label")) for option in field.get("options", []) if isinstance(option, dict)]
 
 
+def _option_entries(option: dict[str, Any]) -> dict[Any, Any]:
+    """The ``name -> value`` pairs in the form of one offered authenticator."""
+    form = (option.get("value") or {}).get("form") or {}
+    return {entry.get("name"): entry.get("value") for entry in form.get("value", []) if isinstance(entry, dict)}
+
+
+def _offer_summary(idx: Any) -> str:
+    """What one IDX answer offers, for the debug log.
+
+    This reads names and method types only, so nothing secret can reach the
+    log through it. Do not add a handle, a code, a message text or any other
+    value from ``idx``: a login log gets pasted into issues.
+    """
+    if not isinstance(idx, dict):
+        return "a body that is not JSON"
+    block = idx.get("remediation")
+    steps = block.get("value", []) if isinstance(block, dict) else []
+    names = [str(step.get("name")) for step in steps if isinstance(step, dict)]
+    field = _authenticator_field(idx) or {}
+    methods = [
+        str(_option_entries(option).get("methodType"))
+        for option in field.get("options", [])
+        if isinstance(option, dict)
+    ]
+    return (
+        f"remediations {names or 'none'}, authenticators {methods or 'none'}, "
+        f"interaction code {'issued' if 'successWithInteractionCode' in idx else 'not issued'}, "
+        f"error message {'yes' if _idx_messages(idx) else 'no'}"
+    )
+
+
 def _authenticator_by_method(idx: dict[str, Any], method_type: str) -> dict[str, str] | None:
     """The ``{id, methodType}`` Okta wants back for one offered authenticator.
 
@@ -535,10 +572,7 @@ def _authenticator_by_method(idx: dict[str, Any], method_type: str) -> dict[str,
     for option in field.get("options", []):
         if not isinstance(option, dict):
             continue
-        form = (option.get("value") or {}).get("form") or {}
-        entries = {
-            entry.get("name"): entry.get("value") for entry in form.get("value", []) if isinstance(entry, dict)
-        }
+        entries = _option_entries(option)
         if entries.get("methodType") != method_type:
             continue
         identifier = entries.get("id")
